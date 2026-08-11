@@ -59,6 +59,58 @@ critic agent checks the draft against the retrieved evidence, and if it
 isn't well-supported, a rewriter reformulates and retries instead of
 returning an unverified answer.
 
+## Workflow: how a request flows through the system
+
+The diagram above shows what happens *inside* the agent pipeline. This one
+shows the full round trip — every layer a question passes through, from
+the browser to the database and back:
+
+```
+┌──────────┐   1. POST question    ┌──────────────┐
+│ Browser  │ ─────────────────────►│ Django view   │
+│ (chat.js)│                       │ (stream_chat) │
+└────┬─────┘                       └───────┬───────┘
+     │                                     │ 2. proxy request
+     │                                     ▼
+     │                             ┌───────────────┐
+     │                             │  FastAPI       │
+     │                             │  /query/stream │
+     │                             └───────┬────────┘
+     │                                     │ 3. runs
+     │                                     ▼
+     │                     ┌───────────────────────────────┐
+     │                     │   LangGraph agent pipeline     │
+     │                     │  (Contextualizer → … → Critic  │
+     │                     │   → Rewriter loop → Finalize)  │
+     │                     └───────────────┬─────────────────┘
+     │                                     │ 4. tokens stream out
+     │        5. SSE tokens                │    as synthesizer writes
+     │◄────────────────────────────────────┘
+     │  (rendered live, word by word)
+     │
+     │                             ┌────────────────┐
+     │        6. stream ends       │ Django saves    │
+     │─────────────────────────────►│ Message model   │
+     │                             │ (sources, domain,│
+     │                             │  grounded, time)│
+     │                             └────────┬─────────┘
+     │                                      │
+     │        7. badge + trace render       │
+     │◄─────────────────────────────────────┘
+     ▼
+┌──────────────────────────────────┐
+│ GROUNDED ● 3.2s ⧉ Copy            │
+│ ▼ Agent trace: domains, sub-Qs,   │
+│   sources (clickable PDF links)   │
+└────────────────────────────────────┘
+```
+
+Two servers are involved on purpose: FastAPI owns the agent pipeline and
+model calls, while Django owns the dashboard, conversation history, and
+persistence. Django never talks to the agents directly — it always proxies
+through FastAPI's `/query/stream` endpoint, which is what keeps the two
+services cleanly separated.
+
 ## Primary interface: Django dashboard
 
 The main way to use this project is the **Django web dashboard**
