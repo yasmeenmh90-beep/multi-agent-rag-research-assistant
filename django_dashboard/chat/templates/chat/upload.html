@@ -1,0 +1,82 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload Documents — Multi-Agent RAG</title>
+    <link rel="icon" type="image/x-icon" href="{% static 'chat/img/favicon.ico' %}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=4">
+</head>
+<body>
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-mark">◆</span>
+                <div>
+                    <div class="brand-name">Multi-Agent RAG</div>
+                    <div class="brand-sub">7-agent pipeline · 330 docs</div>
+                </div>
+            </div>
+            <a href="{% url 'chat:index' %}" class="btn-secondary">← Back to chat</a>
+            <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
+        </aside>
+
+        <main class="main">
+            <header class="topbar">
+                <div class="topbar-title">Upload your own documents</div>
+            </header>
+
+            <div class="corpus-body">
+                <p style="color: var(--text-dim); font-size: 0.85rem; max-width: 640px;">
+                    Add PDFs to an existing domain (ai_papers, general, multi_agent) or
+                    type a new domain name to create one. Files are embedded and become
+                    queryable immediately after upload — no restart needed.
+                </p>
+
+                {% if error %}
+                    <div class="corpus-warning">{{ error }}</div>
+                {% endif %}
+
+                {% if result %}
+                    <div class="corpus-domain">
+                        <div class="corpus-domain-header">
+                            <span class="corpus-domain-name">{{ result.domain }}</span>
+                            <span class="corpus-domain-count">{{ result.files_saved }} file{{ result.files_saved|pluralize }} saved · {{ result.chunks_added }} chunks added</span>
+                        </div>
+                        {% if result.files_failed %}
+                            <div class="trace-section">
+                                <div class="trace-label">Skipped (unsupported or failed)</div>
+                                <ul class="trace-list">
+                                    {% for f in result.files_failed %}<li>{{ f }}</li>{% endfor %}
+                                </ul>
+                            </div>
+                        {% endif %}
+                    </div>
+                {% endif %}
+
+                <form method="post" enctype="multipart/form-data" style="margin-top: 16px; max-width: 480px;">
+                    {% csrf_token %}
+                    <div style="margin-bottom: 14px;">
+                        <label for="domain" style="display:block; font-size:0.8rem; color:var(--text-dim); margin-bottom:6px;">
+                            Domain name
+                        </label>
+                        <input type="text" id="domain" name="domain" placeholder="e.g. ai_papers or a new topic name"
+                               style="width:100%; background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px 12px; color:var(--text); font-family:var(--sans);">
+                    </div>
+                    <div style="margin-bottom: 14px;">
+                        <label for="files" style="display:block; font-size:0.8rem; color:var(--text-dim); margin-bottom:6px;">
+                            PDF / TXT / MD files
+                        </label>
+                        <input type="file" id="files" name="files" multiple accept=".pdf,.txt,.md"
+                               style="color: var(--text);">
+                    </div>
+                    <button type="submit" id="send-btn" style="padding: 10px 22px;">Upload & Ingest</button>
+                </form>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

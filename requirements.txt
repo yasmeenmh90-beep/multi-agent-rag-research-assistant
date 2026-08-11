@@ -1,0 +1,20 @@
+langchain==0.2.11
+langchain-core==0.2.43
+langchain-community==0.2.10
+langchain-openai==0.1.20
+langgraph==0.2.14
+chromadb==0.4.24
+pypdf==4.2.0
+fastapi==0.112.0
+uvicorn==0.30.5
+gradio==4.44.0
+huggingface_hub==0.25.2
+audioop-lts; python_version >= "3.13"
+python-dotenv==1.0.1
+pydantic==2.8.2
+ragas==0.1.11
+datasets==2.20.0
+tiktoken>=0.8.0
+rank_bm25==0.2.2
+sentence-transformers==3.0.1
+numpy<2.0.0,>=1.26.0

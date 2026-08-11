@@ -1,0 +1,77 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>History — Multi-Agent RAG</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=11">
+    <link rel="icon" type="image/x-icon" href="{% static 'chat/img/favicon.ico' %}">
+</head>
+<body>
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-mark">◆</span>
+                <div>
+                    <div class="brand-name">Multi-Agent RAG</div>
+                    <div class="brand-sub">7-agent pipeline · 330 docs</div>
+                </div>
+            </div>
+            <a href="{% url 'chat:index' %}" class="btn-secondary">← Back to chat</a>
+            <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
+            <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
+        </aside>
+
+        <main class="main">
+            <header class="topbar">
+                <div class="topbar-title">Conversation history</div>
+                <div class="pipeline-strip">{{ conversations|length }} conversation{{ conversations|length|pluralize }}</div>
+            </header>
+
+            <div style="padding: 16px 16px 0;">
+                <input type="text" id="history-search" placeholder="Search conversations by title…"
+                       style="width:100%; background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:var(--sans); font-size:0.85rem;">
+            </div>
+
+            <div class="corpus-body">
+                {% for conv in conversations %}
+                    <div class="corpus-domain history-row" data-title="{{ conv.title|default:"New conversation"|lower }}">
+                        <a href="{% url 'chat:index' %}?c={{ conv.id }}" class="history-link">
+                            <span class="corpus-domain-name" style="text-transform:none; font-family:var(--sans); font-size:0.9rem;">{{ conv.title|default:"New conversation" }}</span>
+                            <span class="corpus-domain-count">{{ conv.messages.count }} turn{{ conv.messages.count|pluralize }} · {{ conv.updated_at|date:"M j, Y H:i" }}</span>
+                        </a>
+                        <div class="history-actions">
+                            <a href="{% url 'chat:export_conversation' conv.id %}" class="btn-tiny" style="text-decoration:none; display:inline-block;">⬇ Export</a>
+                            <form method="post" action="{% url 'chat:rename_conversation' conv.id %}" class="rename-form">
+                                {% csrf_token %}
+                                <input type="text" name="title" placeholder="Rename…" value="{{ conv.title }}">
+                                <button type="submit" class="btn-tiny">Save</button>
+                            </form>
+                            <form method="post" action="{% url 'chat:delete_conversation' conv.id %}"
+                                  onsubmit="return confirm('Delete this conversation permanently?');">
+                                {% csrf_token %}
+                                <button type="submit" class="btn-tiny btn-danger">Delete</button>
+                            </form>
+                        </div>
+                    </div>
+                {% empty %}
+                    <div class="corpus-warning">No conversations yet — ask something on the chat page to start one.</div>
+                {% endfor %}
+            </div>
+        </main>
+    </div>
+
+    <script>
+        document.getElementById('history-search').addEventListener('input', function (e) {
+            var q = e.target.value.trim().toLowerCase();
+            document.querySelectorAll('.history-row').forEach(function (row) {
+                var title = row.dataset.title || '';
+                row.style.display = title.indexOf(q) !== -1 ? '' : 'none';
+            });
+        });
+    </script>
+</body>
+</html>

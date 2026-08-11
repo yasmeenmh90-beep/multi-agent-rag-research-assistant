@@ -1,0 +1,64 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Corpus — Multi-Agent RAG</title>
+    <link rel="icon" type="image/x-icon" href="{% static 'chat/img/favicon.ico' %}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=3">
+</head>
+<body>
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-mark">◆</span>
+                <div>
+                    <div class="brand-name">Multi-Agent RAG</div>
+                    <div class="brand-sub">7-agent pipeline · 330 docs</div>
+                </div>
+            </div>
+            <a href="{% url 'chat:index' %}" class="btn-secondary">← Back to chat</a>
+            <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
+        </aside>
+
+        <main class="main">
+            <header class="topbar">
+                <div class="topbar-title">Ingested corpus</div>
+                <div class="pipeline-strip">{{ total_docs }} document{{ total_docs|pluralize }} across {{ domains|length }} domain{{ domains|length|pluralize }}</div>
+            </header>
+
+            <div class="corpus-body">
+                {% if not corpus_dir_found %}
+                    <div class="corpus-warning">
+                        Corpus directory not found at <code>{{ corpus_dir }}</code>.
+                        Set <code>CORPUS_DIR</code> in your Django settings to point at
+                        the folder containing your domain subfolders.
+                    </div>
+                {% endif %}
+
+                {% for d in domains %}
+                    <div class="corpus-domain">
+                        <div class="corpus-domain-header">
+                            <span class="corpus-domain-name">{{ d.name }}</span>
+                            <span class="corpus-domain-count">{{ d.count }} doc{{ d.count|pluralize }}</span>
+                        </div>
+                        <details class="corpus-file-list">
+                            <summary>Show files</summary>
+                            <ul class="trace-list sources-list">
+                                {% for f in d.files %}<li>{{ f }}</li>{% endfor %}
+                            </ul>
+                        </details>
+                    </div>
+                {% empty %}
+                    {% if corpus_dir_found %}
+                        <div class="corpus-warning">No domain subfolders found in the corpus directory.</div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+        </main>
+    </div>
+</body>
+</html>
