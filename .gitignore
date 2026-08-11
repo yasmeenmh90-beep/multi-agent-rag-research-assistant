@@ -3,6 +3,4 @@ __pycache__/
 *.pyc
 .env
 chroma_db/
-data/documents/**/*
-!data/documents/.gitkeep
 .DS_Store
