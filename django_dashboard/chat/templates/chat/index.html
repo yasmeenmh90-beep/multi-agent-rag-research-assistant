@@ -4,44 +4,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Multi-Agent RAG — Dashboard</title>
+    <title>Multi-Agent RAG — Chat</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=12">
+    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=13">
     <link rel="icon" type="image/x-icon" href="{% static 'chat/img/favicon.ico' %}">
     <link rel="icon" type="image/png" sizes="32x32" href="{% static 'chat/img/favicon-32.png' %}">
     <link rel="apple-touch-icon" href="{% static 'chat/img/favicon-180.png' %}">
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        /* Light visual polish - no ids/classes touched that chat.js relies on,
+           only additive rules layered on top of style.css. */
+        .messages { padding: 20px 24px; }
+        .bubble { box-shadow: 0 1px 2px rgba(0,0,0,0.15); }
+        .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; opacity: 0.75; }
+        .empty-mark { font-size: 2.2rem; color: var(--accent); margin-bottom: 10px; }
+        .composer { box-shadow: 0 -2px 8px rgba(0,0,0,0.15); }
+        #question-input { border-radius: 10px; }
+        #send-btn { border-radius: 10px; font-weight: 700; }
+        .btn-new { font-weight: 700; }
+    </style>
 </head>
 <body>
-    <div id="splash-screen" class="splash-screen">
-        <div class="splash-content">
-            <div class="splash-logo-wrap">
-                <div class="splash-ring"></div>
-                <div class="splash-mark">◆</div>
-            </div>
-            <div class="splash-name">Multi-Agent RAG</div>
-            <div class="splash-sub">Grounded Research Assistant</div>
-
-            <div class="splash-agents" id="splash-agents">
-                <span class="splash-agent" data-agent="Contextualizer">Contextualizer</span>
-                <span class="splash-agent" data-agent="Router">Router</span>
-                <span class="splash-agent" data-agent="Planner">Planner</span>
-                <span class="splash-agent" data-agent="Retriever">Retriever</span>
-                <span class="splash-agent" data-agent="Synthesizer">Synthesizer</span>
-                <span class="splash-agent" data-agent="Critic">Critic</span>
-                <span class="splash-agent" data-agent="Rewriter">Rewriter</span>
-            </div>
-
-            <div class="splash-status" id="splash-status">Initializing…</div>
-            <div class="splash-progress">
-                <div class="splash-progress-bar" id="splash-progress-bar"></div>
-            </div>
-            <div class="splash-percent" id="splash-percent">0%</div>
-            <div class="splash-skip">Click or press any key to skip</div>
-        </div>
-    </div>
-
     <div class="shell">
 
         <aside class="sidebar">
@@ -49,55 +33,15 @@
                 <span class="brand-mark">◆</span>
                 <div>
                     <div class="brand-name">Multi-Agent RAG</div>
-                    <div class="brand-sub">7-agent pipeline · 150 docs</div>
+                    <div class="brand-sub">7-agent pipeline</div>
                 </div>
             </div>
 
             <button id="new-conversation" class="btn-new">+ New conversation</button>
+            <a href="{% url 'chat:stats_dashboard' %}" class="btn-secondary">📊 Dashboard</a>
             <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
             <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
             <a href="{% url 'chat:history' %}" class="btn-secondary">🕘 History</a>
-
-            <div class="stats-card">
-                <div class="stats-title">Dashboard stats</div>
-                <div class="stat-row">
-                    <span>Conversations</span>
-                    <span class="stat-value">{{ stats.total_conversations }}</span>
-                </div>
-                <div class="stat-row">
-                    <span>Total turns</span>
-                    <span class="stat-value">{{ stats.total_messages }}</span>
-                </div>
-                <div class="stat-row">
-                    <span>Grounded rate</span>
-                    <span class="stat-value accent">{{ stats.grounded_rate }}%</span>
-                </div>
-            </div>
-
-            {% if top_domains %}
-            <div class="stats-card">
-                <div class="stats-title">Trending topics</div>
-                {% for domain, count in top_domains %}
-                    <button type="button" class="suggestion-chip"
-                            data-question="What are the key ideas in {{ domain }}?">
-                        <span>{{ domain }}</span>
-                        <span class="stat-value">{{ count }}</span>
-                    </button>
-                {% endfor %}
-            </div>
-            {% endif %}
-
-            {% if top_sources %}
-            <div class="stats-card">
-                <div class="stats-title">Popular papers</div>
-                {% for source, count in top_sources %}
-                    <div class="popular-paper" title="{{ source }}">
-                        <span class="paper-name">{{ source }}</span>
-                        <span class="paper-count">{{ count }}×</span>
-                    </div>
-                {% endfor %}
-            </div>
-            {% endif %}
         </aside>
 
         <main class="main">
@@ -201,94 +145,6 @@
     </div>
 
     <script>window.DJANGO_URLS = {stream: "{% url 'chat:stream_chat' %}", newConversation: "{% url 'chat:new_conversation' %}", downloadSource: "{% url 'chat:download_source' %}"};</script>
-    <script src="{% static 'chat/js/chat.js' %}?v=12"></script>
-    <script>
-        (function () {
-            var splash = document.getElementById('splash-screen');
-
-            // Only play the full boot animation once per browser tab session -
-            // navigating to History/Corpus/Upload and back re-loads this page
-            // (this isn't a single-page app), so without this check the splash
-            // would replay every single time.
-            if (sessionStorage.getItem('splashShown')) {
-                splash.remove();
-                return;
-            }
-            sessionStorage.setItem('splashShown', '1');
-
-            var statusEl = document.getElementById('splash-status');
-            var progressBar = document.getElementById('splash-progress-bar');
-            var percentEl = document.getElementById('splash-percent');
-            var agentEls = document.querySelectorAll('.splash-agent');
-            var TOTAL_MS = 30000;
-
-            var agentNames = ['Contextualizer', 'Router', 'Planner', 'Retriever', 'Synthesizer', 'Critic', 'Rewriter'];
-            var steps = [
-                'Booting Contextualizer…',
-                'Loading Router…',
-                'Warming up Planner…',
-                'Connecting Hybrid Retriever…',
-                'Starting Synthesizer…',
-                'Calibrating Critic…',
-                'Standing by Rewriter…',
-                'Loaded {{ corpus_total_docs }} documents across {{ corpus_domain_count }} domains…',
-                'All agents ready.'
-            ];
-            var stepMs = TOTAL_MS / steps.length;
-            var i = 0;
-
-            function applyStep(idx) {
-                statusEl.textContent = steps[idx];
-                agentEls.forEach(function (el, agentIdx) {
-                    el.classList.remove('active');
-                    if (agentIdx < idx) el.classList.add('done');
-                    if (agentIdx === idx && idx < agentNames.length) el.classList.add('active');
-                });
-                if (idx >= agentNames.length) {
-                    agentEls.forEach(function (el) { el.classList.add('done'); });
-                }
-            }
-            applyStep(0);
-
-            var stepTimer = setInterval(function () {
-                i++;
-                if (i < steps.length) {
-                    applyStep(i);
-                } else {
-                    clearInterval(stepTimer);
-                }
-            }, stepMs);
-
-            // Progress bar + percentage counter, both driven by the same clock.
-            var startTime = Date.now();
-            progressBar.style.transitionDuration = (TOTAL_MS / 1000) + 's';
-            requestAnimationFrame(function () {
-                progressBar.style.width = '100%';
-            });
-            var percentTimer = setInterval(function () {
-                var pct = Math.min(100, Math.round(((Date.now() - startTime) / TOTAL_MS) * 100));
-                percentEl.textContent = pct + '%';
-                if (pct >= 100) clearInterval(percentTimer);
-            }, 100);
-
-            function hideSplash() {
-                clearInterval(stepTimer);
-                clearInterval(percentTimer);
-                splash.classList.add('splash-hide');
-                setTimeout(function () { splash.remove(); }, 500);
-            }
-
-            var doneTimer = setTimeout(hideSplash, TOTAL_MS);
-            splash.addEventListener('click', function () {
-                clearTimeout(doneTimer);
-                hideSplash();
-            });
-            document.addEventListener('keydown', function onKey() {
-                clearTimeout(doneTimer);
-                hideSplash();
-                document.removeEventListener('keydown', onKey);
-            });
-        })();
-    </script>
+    <script src="{% static 'chat/js/chat.js' %}?v=13"></script>
 </body>
 </html>

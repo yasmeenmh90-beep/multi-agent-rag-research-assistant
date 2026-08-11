@@ -56,3 +56,19 @@ class EvalRun(models.Model):
     def __str__(self):
         return f"Eval {self.created_at:%Y-%m-%d %H:%M} - faithfulness {self.faithfulness_avg}"
  
+
+
+class UploadRecord(models.Model):
+    """One completed upload-and-ingest batch to the corpus, so the Upload
+    page can show a real history instead of only the most recent result."""
+    domain = models.CharField(max_length=100)
+    files_saved = models.IntegerField(default=0)
+    chunks_added = models.IntegerField(default=0)
+    files_failed = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.domain}: {self.files_saved} files, {self.chunks_added} chunks"

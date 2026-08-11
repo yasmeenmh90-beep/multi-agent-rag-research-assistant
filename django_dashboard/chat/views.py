@@ -10,7 +10,7 @@ from django.shortcuts import render, get_object_or_404, redirect
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-from .models import Conversation, Message
+from .models import Conversation, Message, UploadRecord
 
 
 @ensure_csrf_cookie
@@ -158,9 +158,28 @@ def download_source(request):
     raise Http404("Source file not found")
 
 
+def _known_domains():
+    """Domain names seen so far, for the Upload page's domain suggestions -
+    drawn from past upload records plus whatever's already on disk."""
+    names = set(
+        UploadRecord.objects.order_by().values_list("domain", flat=True).distinct()
+    )
+    corpus_dir = getattr(settings, "CORPUS_DIR", None)
+    if not corpus_dir:
+        corpus_dir = os.path.normpath(
+            os.path.join(settings.BASE_DIR, "..", "data", "documents")
+        )
+    if os.path.isdir(corpus_dir):
+        for name in os.listdir(corpus_dir):
+            if os.path.isdir(os.path.join(corpus_dir, name)):
+                names.add(name)
+    return sorted(names)
+
+
 def upload_corpus(request):
     """GET: show the upload form. POST: proxy the files to FastAPI's
-    /corpus/upload endpoint, which saves + immediately ingests them."""
+    /corpus/upload endpoint, which saves + immediately ingests them, then
+    save an UploadRecord so the page has a real upload history."""
     if request.method == "POST":
         domain = (request.POST.get("domain") or "").strip()
         files = request.FILES.getlist("files")
@@ -168,6 +187,8 @@ def upload_corpus(request):
         if not domain or not files:
             return render(request, "chat/upload.html", {
                 "error": "Please provide a domain name and at least one file.",
+                "upload_history": UploadRecord.objects.all()[:20],
+                "known_domains": _known_domains(),
             })
 
         files_payload = [
@@ -187,11 +208,27 @@ def upload_corpus(request):
         except requests.RequestException as exc:
             return render(request, "chat/upload.html", {
                 "error": f"Upload failed: {exc}",
+                "upload_history": UploadRecord.objects.all()[:20],
+                "known_domains": _known_domains(),
             })
 
-        return render(request, "chat/upload.html", {"result": result})
+        UploadRecord.objects.create(
+            domain=domain,
+            files_saved=result.get("files_saved", 0),
+            chunks_added=result.get("chunks_added", 0),
+            files_failed=result.get("files_failed", []),
+        )
 
-    return render(request, "chat/upload.html", {})
+        return render(request, "chat/upload.html", {
+            "result": result,
+            "upload_history": UploadRecord.objects.all()[:20],
+            "known_domains": _known_domains(),
+        })
+
+    return render(request, "chat/upload.html", {
+        "upload_history": UploadRecord.objects.all()[:20],
+        "known_domains": _known_domains(),
+    })
 
 
 def corpus(request):
@@ -316,3 +353,85 @@ def stream_chat(request):
     response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
     return response
+
+def stats_dashboard(request):
+    """Stats overview: conversation/message counts, grounded rate, corpus
+    size, a 14-day conversation trend, domain distribution, response times
+    for the last 20 turns, recent conversations, trending domains, and
+    the most-cited source documents. All computed from the real
+    Conversation/Message tables - no mock data."""
+    from datetime import timedelta
+    from django.utils import timezone
+
+    total_conversations = Conversation.objects.count()
+    total_messages = Message.objects.count()
+    grounded_count = Message.objects.filter(is_grounded=True).count()
+    ungrounded_count = total_messages - grounded_count
+    grounded_rate = round(100 * grounded_count / total_messages) if total_messages else 0
+
+    domain_counter = Counter()
+    source_counter = Counter()
+    for m in Message.objects.only("domains_used", "sources"):
+        for d in (m.domains_used or []):
+            domain_counter[d] += 1
+        for s in (m.sources or []):
+            source_counter[s] += 1
+
+    trending_domains = domain_counter.most_common(5)
+    popular_sources = source_counter.most_common(5)
+    domain_distribution = domain_counter.most_common(8)
+
+    corpus_dir = getattr(settings, "CORPUS_DIR", None)
+    if not corpus_dir:
+        corpus_dir = os.path.normpath(
+            os.path.join(settings.BASE_DIR, "..", "data", "documents")
+        )
+    corpus_total_docs = 0
+    corpus_domain_count = 0
+    if os.path.isdir(corpus_dir):
+        for name in os.listdir(corpus_dir):
+            domain_path = os.path.join(corpus_dir, name)
+            if os.path.isdir(domain_path):
+                n = len([f for f in os.listdir(domain_path) if f.lower().endswith(".pdf")])
+                if n:
+                    corpus_domain_count += 1
+                    corpus_total_docs += n
+
+    today = timezone.localdate()
+    conv_trend = []
+    for i in range(13, -1, -1):
+        day = today - timedelta(days=i)
+        count = Conversation.objects.filter(created_at__date=day).count()
+        conv_trend.append({"date": day.strftime("%m-%d"), "count": count})
+
+    response_times = list(
+        Message.objects.exclude(response_time_s=0)
+        .order_by("-created_at")[:20]
+        .values_list("response_time_s", flat=True)
+    )
+    response_times.reverse()
+
+    recent_conversations = Conversation.objects.all()[:6]
+
+    context = {
+        "stats": {
+            "total_conversations": total_conversations,
+            "total_messages": total_messages,
+            "grounded_rate": grounded_rate,
+            "grounded_count": grounded_count,
+            "ungrounded_count": ungrounded_count,
+            "corpus_total_docs": corpus_total_docs,
+            "corpus_domain_count": corpus_domain_count,
+        },
+        "recent_conversations": recent_conversations,
+        "trending_domains": trending_domains,
+        "popular_sources": popular_sources,
+        # Passed as plain Python objects - the template feeds these to
+        # Chart.js via the |json_script filter, which serializes and
+        # escapes them safely into their own <script type="application/json">
+        # tag, rather than splicing raw {{ }} tags into inline JS.
+        "conv_trend": conv_trend,
+        "domain_distribution": domain_distribution,
+        "response_times": response_times,
+    }
+    return render(request, "chat/dashboard.html", context)

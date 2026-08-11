@@ -1,0 +1,382 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard — Multi-Agent RAG</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=2">
+    <link rel="icon" type="image/x-icon" href="{% static 'chat/img/favicon.ico' %}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        .dash-header { display: flex; align-items: flex-start; justify-content: space-between; }
+        .dash-header-title { font-size: 1.7rem; font-weight: 700; font-family: var(--sans); margin: 0 0 4px; }
+        .dash-header-sub { color: var(--text-dim); font-size: 0.9rem; }
+        .dash-new-conv { display: inline-flex; align-items: center; gap: 6px; padding: 11px 20px; border-radius: 8px; background: var(--accent); color: var(--bg); font-weight: 700; font-size: 0.85rem; text-decoration: none; white-space: nowrap; }
+        .dash-new-conv:hover { opacity: 0.88; }
+        .dash-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin: 24px 0 1rem; }
+        .dash-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
+        .dash-card-icon { width: 40px; height: 40px; border-radius: 10px; background: var(--accent-dim); color: var(--accent); display: flex; align-items: center; justify-content: center; font-size: 1.1rem; margin-bottom: 1rem; }
+        .dash-value { font-size: 1.6rem; font-weight: 700; font-family: var(--sans); }
+        .dash-label { font-size: 0.85rem; color: var(--text-dim); margin-top: 2px; }
+        .dash-sub { font-size: 0.75rem; color: var(--text-dim); opacity: 0.7; margin-top: 6px; font-family: var(--mono); }
+        .dash-row { display: grid; gap: 1rem; margin-bottom: 1rem; min-width: 0; }
+        .dash-row-3 { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+        .dash-row-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+        .dash-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
+        .dash-panel h3 { font-size: 0.9rem; font-weight: 600; margin: 0 0 1rem; }
+        .dash-list-row { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
+        .dash-list-row:last-child { border-bottom: none; }
+        .dash-list-row a { color: var(--text); text-decoration: none; }
+        .dash-list-row a:hover { color: var(--accent); }
+        .dash-count { font-family: var(--mono); color: var(--accent); font-size: 0.8rem; }
+        .dash-legend span.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+        /* Defensive layout override: ensures the sidebar can never sit on
+           top of / overlap the main content, regardless of how .sidebar is
+           positioned in the shared style.css (fixed, sticky, etc). */
+        .shell { display: flex !important; align-items: flex-start !important; min-height: 100vh; }
+        .sidebar { position: relative !important; top: auto !important; left: auto !important; flex: 0 0 auto; }
+        .main { flex: 1 1 0% !important; min-width: 0 !important; }
+        .dash-content { max-width: 1320px; margin: 0 auto; min-width: 0; overflow-x: hidden; }
+        .dash-panel { min-width: 0; }
+        .chart-box { position: relative; height: 220px; width: 100%; min-width: 0; box-sizing: border-box; }
+        .chart-box.chart-box-sm { height: 200px; }
+        .chart-box canvas { max-width: 100%; }
+        .dash-legend { display: flex; gap: 1rem; justify-content: center; margin-top: 0.75rem; font-size: 0.8rem; color: var(--text-dim); }
+        .dash-list-row span, .dash-list-row a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .dash-scroll { max-height: 340px; overflow-y: auto; padding-right: 4px; }
+        .dash-scroll::-webkit-scrollbar { width: 6px; }
+        .dash-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, 1fr); } .dash-row-3, .dash-row-2 { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div id="splash-screen" class="splash-screen">
+        <div class="splash-content">
+            <div class="splash-logo-wrap">
+                <div class="splash-ring"></div>
+                <div class="splash-mark">◆</div>
+            </div>
+            <div class="splash-name">Multi-Agent RAG</div>
+            <div class="splash-sub">Grounded Research Assistant</div>
+
+            <div class="splash-agents" id="splash-agents">
+                <span class="splash-agent" data-agent="Contextualizer">Contextualizer</span>
+                <span class="splash-agent" data-agent="Router">Router</span>
+                <span class="splash-agent" data-agent="Planner">Planner</span>
+                <span class="splash-agent" data-agent="Retriever">Retriever</span>
+                <span class="splash-agent" data-agent="Synthesizer">Synthesizer</span>
+                <span class="splash-agent" data-agent="Critic">Critic</span>
+                <span class="splash-agent" data-agent="Rewriter">Rewriter</span>
+            </div>
+
+            <div class="splash-status" id="splash-status">Initializing…</div>
+            <div class="splash-progress">
+                <div class="splash-progress-bar" id="splash-progress-bar"></div>
+            </div>
+            <div class="splash-percent" id="splash-percent">0%</div>
+            <div class="splash-skip">Click or press any key to skip</div>
+        </div>
+    </div>
+
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-mark">◆</span>
+                <div>
+                    <div class="brand-name">Multi-Agent RAG</div>
+                    <div class="brand-sub">7-agent pipeline</div>
+                </div>
+            </div>
+            <a href="{% url 'chat:stats_dashboard' %}" class="btn-secondary" style="border-color:var(--accent); color:var(--accent);">📊 Dashboard</a>
+            <a href="{% url 'chat:history' %}" class="btn-secondary">🕘 History</a>
+            <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
+            <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
+        </aside>
+
+        <main class="main" style="padding: 32px; overflow-y: auto; overflow-x: hidden; min-width: 0;">
+            <div class="dash-content">
+            <div class="dash-header">
+                <div>
+                    <div class="dash-header-title">Dashboard</div>
+                    <div class="dash-header-sub">Multi-agent RAG system overview</div>
+                </div>
+                <a href="{% url 'chat:index' %}" class="dash-new-conv">+ New conversation</a>
+            </div>
+
+            <div class="dash-grid">
+                <div class="dash-card">
+                    <div class="dash-card-icon">💬</div>
+                    <div class="dash-value">{{ stats.total_conversations }}</div>
+                    <div class="dash-label">Conversations</div>
+                    <div class="dash-sub">All time</div>
+                </div>
+                <div class="dash-card">
+                    <div class="dash-card-icon">⚡</div>
+                    <div class="dash-value">{{ stats.total_messages }}</div>
+                    <div class="dash-label">Total turns</div>
+                    <div class="dash-sub">Messages exchanged</div>
+                </div>
+                <div class="dash-card">
+                    <div class="dash-card-icon">🛡</div>
+                    <div class="dash-value">{{ stats.grounded_rate }}%</div>
+                    <div class="dash-label">Grounded rate</div>
+                    <div class="dash-sub">{{ stats.grounded_count }}/{{ stats.total_messages }} grounded</div>
+                </div>
+                <div class="dash-card">
+                    <div class="dash-card-icon">📄</div>
+                    <div class="dash-value">{{ stats.corpus_total_docs }}</div>
+                    <div class="dash-label">Corpus documents</div>
+                    <div class="dash-sub">{{ stats.corpus_domain_count }} domains</div>
+                </div>
+            </div>
+
+            <div class="dash-row dash-row-3">
+                <div class="dash-panel">
+                    <h3>📈 Conversations (14 days)</h3>
+                    <div class="chart-box"><canvas id="convChart"></canvas></div>
+                </div>
+                <div class="dash-panel">
+                    <h3>Grounded vs ungrounded</h3>
+                    <div class="chart-box chart-box-sm"><canvas id="groundedChart"></canvas></div>
+                    <div class="dash-legend">
+                        <span><span class="dot" style="background:var(--good)"></span>Grounded {{ stats.grounded_count }}</span>
+                        <span><span class="dot" style="background:var(--warn)"></span>Ungrounded {{ stats.ungrounded_count }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="dash-row dash-row-2">
+                <div class="dash-panel">
+                    <h3>📊 Domain distribution</h3>
+                    <div class="chart-box"><canvas id="domainChart"></canvas></div>
+                </div>
+                <div class="dash-panel">
+                    <h3>Response time (last {{ response_times|length }} turns)</h3>
+                    <div class="chart-box"><canvas id="latencyChart"></canvas></div>
+                </div>
+            </div>
+
+            <div class="dash-row dash-row-3">
+                <div class="dash-panel">
+                    <h3>Recent conversations</h3>
+                    {% for c in recent_conversations %}
+                        <div class="dash-list-row">
+                            <a href="{% url 'chat:index' %}?c={{ c.id }}">{{ c.title|default:"New conversation" }}</a>
+                            <span class="dash-count">{{ c.updated_at|date:"M d" }}</span>
+                        </div>
+                    {% empty %}
+                        <div class="dash-list-row"><span>No conversations yet.</span></div>
+                    {% endfor %}
+                </div>
+                <div class="dash-panel">
+                    <h3>Trending domains</h3>
+                    <div class="dash-scroll">
+                    {% for name, count in trending_domains %}
+                        <div class="dash-list-row"><span title="{{ name }}">{{ name }}</span><span class="dash-count">{{ count }}×</span></div>
+                    {% empty %}
+                        <div class="dash-list-row"><span>No data yet.</span></div>
+                    {% endfor %}
+                    </div>
+                    <h3 style="margin-top:1.25rem; padding-top:1rem; border-top:1px solid var(--border);">Popular sources</h3>
+                    <div class="dash-scroll">
+                    {% for name, count in popular_sources %}
+                        <div class="dash-list-row">
+                            <a href="{% url 'chat:download_source' %}?file={{ name }}" target="_blank" title="{{ name }}" style="font-family:var(--mono); font-size:0.78rem;">{{ name }}</a>
+                            <span class="dash-count">{{ count }}×</span>
+                        </div>
+                    {% empty %}
+                        <div class="dash-list-row"><span>No data yet.</span></div>
+                    {% endfor %}
+                    </div>
+                </div>
+            </div>
+            </div>
+        </main>
+    </div>
+
+    {{ conv_trend|json_script:"conv-trend-data" }}
+    {{ domain_distribution|json_script:"domain-distribution-data" }}
+    {{ response_times|json_script:"response-times-data" }}
+
+    <script>
+        const convTrend = JSON.parse(document.getElementById('conv-trend-data').textContent);
+        const domainDistribution = JSON.parse(document.getElementById('domain-distribution-data').textContent);
+        const responseTimes = JSON.parse(document.getElementById('response-times-data').textContent);
+
+        const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        const accent = cssVar('--accent') || '#4FD1C5';
+        const good = cssVar('--good') || '#6EE7B7';
+        const warn = cssVar('--warn') || '#F6AD55';
+        const textDim = cssVar('--text-dim') || '#9CA0A6';
+        const border = cssVar('--border') || '#2C2F33';
+        Chart.defaults.color = textDim;
+        Chart.defaults.font.family = "'Inter', sans-serif";
+        Chart.defaults.font.size = 11;
+
+        new Chart(document.getElementById('convChart'), {
+            type: 'line',
+            data: {
+                labels: convTrend.map(d => d.date),
+                datasets: [{
+                    data: convTrend.map(d => d.count),
+                    borderColor: accent, backgroundColor: accent + '33',
+                    fill: true, tension: 0.35, pointRadius: 0, borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { display: false } },
+                    y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: border } },
+                },
+            },
+        });
+
+        new Chart(document.getElementById('groundedChart'), {
+            type: 'doughnut',
+            data: {
+                labels: ['Grounded', 'Ungrounded'],
+                datasets: [{
+                    data: [{{ stats.grounded_count }}, {{ stats.ungrounded_count }}],
+                    backgroundColor: [good, warn],
+                    borderWidth: 0,
+                }],
+            },
+            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, cutout: '65%' },
+        });
+
+        new Chart(document.getElementById('domainChart'), {
+            type: 'bar',
+            data: {
+                labels: domainDistribution.map(d => d[0]),
+                datasets: [{
+                    data: domainDistribution.map(d => d[1]),
+                    backgroundColor: accent, borderRadius: 4,
+                }],
+            },
+            options: {
+                indexAxis: 'y',
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: border } },
+                    y: { grid: { display: false } },
+                },
+            },
+        });
+
+        new Chart(document.getElementById('latencyChart'), {
+            type: 'line',
+            data: {
+                labels: responseTimes.map((_, i) => i + 1),
+                datasets: [{
+                    data: responseTimes,
+                    borderColor: good, backgroundColor: good,
+                    tension: 0.35, pointRadius: 3, borderWidth: 2,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    x: { grid: { display: false } },
+                    y: { beginAtZero: true, ticks: { callback: (v) => v + 's' }, grid: { color: border } },
+                },
+            },
+        });
+    </script>
+
+    <script>
+        (function () {
+            var splash = document.getElementById('splash-screen');
+
+            // Splash now plays on the Dashboard (the new homepage) instead of
+            // the chat page, and still only once per browser tab session.
+            if (sessionStorage.getItem('splashShown')) {
+                splash.remove();
+                return;
+            }
+            sessionStorage.setItem('splashShown', '1');
+
+            var statusEl = document.getElementById('splash-status');
+            var progressBar = document.getElementById('splash-progress-bar');
+            var percentEl = document.getElementById('splash-percent');
+            var agentEls = document.querySelectorAll('.splash-agent');
+            var TOTAL_MS = 30000;
+
+            var agentNames = ['Contextualizer', 'Router', 'Planner', 'Retriever', 'Synthesizer', 'Critic', 'Rewriter'];
+            var steps = [
+                'Booting Contextualizer…',
+                'Loading Router…',
+                'Warming up Planner…',
+                'Connecting Hybrid Retriever…',
+                'Starting Synthesizer…',
+                'Calibrating Critic…',
+                'Standing by Rewriter…',
+                'Loaded {{ stats.corpus_total_docs }} documents across {{ stats.corpus_domain_count }} domains…',
+                'All agents ready.'
+            ];
+            var stepMs = TOTAL_MS / steps.length;
+            var i = 0;
+
+            function applyStep(idx) {
+                statusEl.textContent = steps[idx];
+                agentEls.forEach(function (el, agentIdx) {
+                    el.classList.remove('active');
+                    if (agentIdx < idx) el.classList.add('done');
+                    if (agentIdx === idx && idx < agentNames.length) el.classList.add('active');
+                });
+                if (idx >= agentNames.length) {
+                    agentEls.forEach(function (el) { el.classList.add('done'); });
+                }
+            }
+            applyStep(0);
+
+            var stepTimer = setInterval(function () {
+                i++;
+                if (i < steps.length) {
+                    applyStep(i);
+                } else {
+                    clearInterval(stepTimer);
+                }
+            }, stepMs);
+
+            var startTime = Date.now();
+            progressBar.style.transitionDuration = (TOTAL_MS / 1000) + 's';
+            requestAnimationFrame(function () {
+                progressBar.style.width = '100%';
+            });
+            var percentTimer = setInterval(function () {
+                var pct = Math.min(100, Math.round(((Date.now() - startTime) / TOTAL_MS) * 100));
+                percentEl.textContent = pct + '%';
+                if (pct >= 100) clearInterval(percentTimer);
+            }, 100);
+
+            function hideSplash() {
+                clearInterval(stepTimer);
+                clearInterval(percentTimer);
+                splash.classList.add('splash-hide');
+                setTimeout(function () { splash.remove(); }, 500);
+            }
+
+            var doneTimer = setTimeout(hideSplash, TOTAL_MS);
+            splash.addEventListener('click', function () {
+                clearTimeout(doneTimer);
+                hideSplash();
+            });
+            document.addEventListener('keydown', function onKey() {
+                clearTimeout(doneTimer);
+                hideSplash();
+                document.removeEventListener('keydown', onKey);
+            });
+        })();
+    </script>
+</body>
+</html>

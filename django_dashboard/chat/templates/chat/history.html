@@ -7,8 +7,31 @@
     <title>History — Multi-Agent RAG</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=11">
+    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=12">
     <link rel="icon" type="image/x-icon" href="{% static 'chat/img/favicon.ico' %}">
+    <style>
+        .h-title { font-size: 1.7rem; font-weight: 700; margin: 0 0 4px; }
+        .h-sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 20px; }
+        .h-search-wrap { position: relative; margin-bottom: 20px; }
+        .h-search-wrap svg { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); opacity: 0.5; }
+        .h-search { width: 100%; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px 12px 40px; color: var(--text); font-family: var(--sans); font-size: 0.9rem; }
+        .h-search:focus { outline: none; border-color: var(--accent); }
+        .h-row { display: flex; align-items: center; gap: 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 10px; transition: border-color 0.15s; }
+        .h-row:hover { border-color: var(--accent); }
+        .h-chevron { color: var(--text-dim); flex-shrink: 0; }
+        .h-link { flex: 1; display: flex; align-items: baseline; gap: 10px; text-decoration: none; color: var(--text); min-width: 0; }
+        .h-link-title { font-weight: 700; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .h-link-meta { color: var(--text-dim); font-family: var(--mono); font-size: 0.78rem; white-space: nowrap; flex-shrink: 0; }
+        .h-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+        .h-icon-btn { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; border-radius: 8px; border: none; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 0.95rem; }
+        .h-icon-btn:hover { background: var(--panel-raised); color: var(--text); }
+        .h-icon-btn.danger:hover { color: #E24B4A; }
+        .h-rename-row { display: none; align-items: center; gap: 8px; flex: 1; }
+        .h-rename-row.active { display: flex; }
+        .h-row.editing .h-link { display: none; }
+        .h-rename-input { flex: 1; background: var(--bg); border: 1px solid var(--accent); border-radius: 8px; padding: 8px 10px; color: var(--text); font-family: var(--sans); font-size: 0.9rem; }
+        .h-empty { text-align: center; padding: 60px 0; color: var(--text-dim); }
+    </style>
 </head>
 <body>
     <div class="shell">
@@ -17,48 +40,55 @@
                 <span class="brand-mark">◆</span>
                 <div>
                     <div class="brand-name">Multi-Agent RAG</div>
-                    <div class="brand-sub">7-agent pipeline · 330 docs</div>
+                    <div class="brand-sub">7-agent pipeline</div>
                 </div>
             </div>
-            <a href="{% url 'chat:index' %}" class="btn-secondary">← Back to chat</a>
+            <a href="{% url 'chat:stats_dashboard' %}" class="btn-secondary">📊 Dashboard</a>
             <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
             <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
+            <a href="{% url 'chat:history' %}" class="btn-secondary" style="border-color:var(--accent); color:var(--accent);">🕘 History</a>
         </aside>
 
-        <main class="main">
-            <header class="topbar">
-                <div class="topbar-title">Conversation history</div>
-                <div class="pipeline-strip">{{ conversations|length }} conversation{{ conversations|length|pluralize }}</div>
-            </header>
-
-            <div style="padding: 16px 16px 0;">
-                <input type="text" id="history-search" placeholder="Search conversations by title…"
-                       style="width:100%; background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:10px 14px; color:var(--text); font-family:var(--sans); font-size:0.85rem;">
+        <main class="main" style="padding: 32px; overflow-y: auto;">
+            <div style="display:flex; align-items:flex-start; justify-content:space-between;">
+                <div>
+                    <div class="h-title">Conversation history</div>
+                    <div class="h-sub">{{ conversations|length }} conversation{{ conversations|length|pluralize }}</div>
+                </div>
+                <a href="{% url 'chat:index' %}" class="dash-new-conv" style="display:inline-flex; align-items:center; gap:6px; padding:11px 20px; border-radius:8px; background:var(--accent); color:var(--bg); font-weight:700; font-size:0.85rem; text-decoration:none; white-space:nowrap;">+ New</a>
             </div>
 
-            <div class="corpus-body">
+            <div class="h-search-wrap">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="text" id="history-search" class="h-search" placeholder="Search conversations…">
+            </div>
+
+            <div id="history-list">
                 {% for conv in conversations %}
-                    <div class="corpus-domain history-row" data-title="{{ conv.title|default:"New conversation"|lower }}">
-                        <a href="{% url 'chat:index' %}?c={{ conv.id }}" class="history-link">
-                            <span class="corpus-domain-name" style="text-transform:none; font-family:var(--sans); font-size:0.9rem;">{{ conv.title|default:"New conversation" }}</span>
-                            <span class="corpus-domain-count">{{ conv.messages.count }} turn{{ conv.messages.count|pluralize }} · {{ conv.updated_at|date:"M j, Y H:i" }}</span>
+                    <div class="h-row" data-title="{{ conv.title|default:"New conversation"|lower }}">
+                        <span class="h-chevron">›</span>
+                        <a href="{% url 'chat:index' %}?c={{ conv.id }}" class="h-link">
+                            <span class="h-link-title">{{ conv.title|default:"New conversation" }}</span>
+                            <span class="h-link-meta">{{ conv.messages.count }} turn{{ conv.messages.count|pluralize }} · {{ conv.updated_at|date:"M j, Y H:i" }}</span>
                         </a>
-                        <div class="history-actions">
-                            <a href="{% url 'chat:export_conversation' conv.id %}" class="btn-tiny" style="text-decoration:none; display:inline-block;">⬇ Export</a>
-                            <form method="post" action="{% url 'chat:rename_conversation' conv.id %}" class="rename-form">
-                                {% csrf_token %}
-                                <input type="text" name="title" placeholder="Rename…" value="{{ conv.title }}">
-                                <button type="submit" class="btn-tiny">Save</button>
-                            </form>
+                        <form class="h-rename-row" method="post" action="{% url 'chat:rename_conversation' conv.id %}">
+                            {% csrf_token %}
+                            <input type="text" name="title" class="h-rename-input" value="{{ conv.title }}">
+                            <button type="submit" class="h-icon-btn" title="Save">✓</button>
+                            <button type="button" class="h-icon-btn h-cancel-rename" title="Cancel">✕</button>
+                        </form>
+                        <div class="h-actions">
+                            <button type="button" class="h-icon-btn h-rename-toggle" title="Rename">✎</button>
+                            <a href="{% url 'chat:export_conversation' conv.id %}" class="h-icon-btn" title="Export" style="text-decoration:none; display:flex;">⬇</a>
                             <form method="post" action="{% url 'chat:delete_conversation' conv.id %}"
-                                  onsubmit="return confirm('Delete this conversation permanently?');">
+                                  onsubmit="return confirm('Delete this conversation permanently?');" style="display:contents;">
                                 {% csrf_token %}
-                                <button type="submit" class="btn-tiny btn-danger">Delete</button>
+                                <button type="submit" class="h-icon-btn danger" title="Delete">🗑</button>
                             </form>
                         </div>
                     </div>
                 {% empty %}
-                    <div class="corpus-warning">No conversations yet — ask something on the chat page to start one.</div>
+                    <div class="h-empty">No conversations yet — ask something on the chat page to start one.</div>
                 {% endfor %}
             </div>
         </main>
@@ -67,9 +97,27 @@
     <script>
         document.getElementById('history-search').addEventListener('input', function (e) {
             var q = e.target.value.trim().toLowerCase();
-            document.querySelectorAll('.history-row').forEach(function (row) {
+            document.querySelectorAll('#history-list .h-row').forEach(function (row) {
                 var title = row.dataset.title || '';
                 row.style.display = title.indexOf(q) !== -1 ? '' : 'none';
+            });
+        });
+
+        document.querySelectorAll('.h-rename-toggle').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var row = btn.closest('.h-row');
+                row.classList.add('editing');
+                row.querySelector('.h-rename-row').classList.add('active');
+                row.querySelector('.h-actions').style.display = 'none';
+                row.querySelector('.h-rename-input').focus();
+            });
+        });
+        document.querySelectorAll('.h-cancel-rename').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                var row = btn.closest('.h-row');
+                row.classList.remove('editing');
+                row.querySelector('.h-rename-row').classList.remove('active');
+                row.querySelector('.h-actions').style.display = '';
             });
         });
     </script>
