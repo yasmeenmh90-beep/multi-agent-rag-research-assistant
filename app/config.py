@@ -35,6 +35,13 @@ RETRIEVER_TOP_K = 4
 RERANK_MODEL = os.getenv("RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 RERANK_CANDIDATES = 12
 
+# Cross-encoder reranking pulls in sentence-transformers + torch, which
+# alone can exceed ~400-500MB of RAM just from the import and model load -
+# too much for memory-capped free-tier deploys. Default OFF so those
+# environments never import torch at all; set ENABLE_RERANKER=true once
+# running on an instance with enough headroom (roughly 1GB+).
+ENABLE_RERANKER = os.getenv("ENABLE_RERANKER", "false").lower() == "true"
+
 # --- Tracing (LangSmith) ----------------------------------------------
 # LangChain/LangGraph pick up LANGCHAIN_TRACING_V2 / LANGCHAIN_API_KEY /
 # LANGCHAIN_PROJECT directly from the environment - no code wiring needed

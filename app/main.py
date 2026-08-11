@@ -1,3 +1,4 @@
+import asyncio
 import json
 import shutil
 import uuid
@@ -20,8 +21,7 @@ SESSIONS: dict[str, list[dict]] = {}
 MAX_HISTORY_TURNS = 6
 
 
-@app.on_event("startup")
-def _warm_caches():
+def _warm_caches_sync():
     domains = discover_domains()
     if domains:
         print(f"Warming BM25 index for domains: {domains} ...")
@@ -31,6 +31,17 @@ def _warm_caches():
     print("Loading cross-encoder reranker model...")
     warm_reranker()
     print("Reranker model loaded.")
+
+
+@app.on_event("startup")
+async def _warm_caches():
+    # Run in a background thread instead of blocking the startup event -
+    # on memory-capped instances, waiting here for BM25/reranker to finish
+    # loading before uvicorn opens its port is what causes Render's port
+    # scanner to time out and kill the deploy as "no open ports detected".
+    # Letting the server start accepting connections immediately means the
+    # deploy succeeds even while warm-up finishes in the background.
+    asyncio.create_task(asyncio.to_thread(_warm_caches_sync))
 
 
 class QueryRequest(BaseModel):

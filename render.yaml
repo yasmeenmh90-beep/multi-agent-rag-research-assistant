@@ -25,6 +25,11 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
+      # Off by default: the cross-encoder reranker needs sentence-transformers
+      # + torch, which alone can exceed the free tier's 512MB RAM. Flip to
+      # "true" once rag-api is upgraded to an instance with more headroom.
+      - key: ENABLE_RERANKER
+        value: "false"
 
   # Django dashboard: chat UI, history, corpus browser, upload, and the
   # stats dashboard. Talks to rag-api over Render's private network.

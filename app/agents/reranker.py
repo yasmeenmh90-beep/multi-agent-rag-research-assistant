@@ -11,16 +11,18 @@ once instead of comparing two separately-computed vectors. This trades a
 bit of latency for noticeably better precision on the final top-k that
 actually reaches the synthesizer.
 """
-from sentence_transformers import CrossEncoder
+from app.config import RERANK_MODEL, ENABLE_RERANKER
 
-from app.config import RERANK_MODEL
-
-_model: CrossEncoder | None = None
+_model = None
 
 
-def _get_model() -> CrossEncoder:
+def _get_model():
+    # Imported lazily, only when reranking is actually enabled - this is
+    # what keeps sentence_transformers/torch out of the process entirely
+    # on memory-capped deploys where ENABLE_RERANKER is left off.
     global _model
     if _model is None:
+        from sentence_transformers import CrossEncoder
         _model = CrossEncoder(RERANK_MODEL)
     return _model
 
@@ -28,15 +30,24 @@ def _get_model() -> CrossEncoder:
 def warm_reranker() -> None:
     """Load the cross-encoder model at process startup rather than on the
     first request - the model download/load (~90MB, one-time, cached under
-    ~/.cache/huggingface after that) would otherwise stall the first query."""
-    _get_model()
+    ~/.cache/huggingface after that) would otherwise stall the first query.
+    No-op when ENABLE_RERANKER is off."""
+    if ENABLE_RERANKER:
+        _get_model()
 
 
 def rerank(query: str, candidates: list[dict], top_k: int) -> list[dict]:
     """Re-score `candidates` (each a {"content", "metadata"} dict) against
-    `query` with the cross-encoder and return the top_k, best first."""
+    `query` with the cross-encoder and return the top_k, best first.
+
+    If ENABLE_RERANKER is off, just truncates the already RRF-fused list
+    to top_k without loading the cross-encoder - lower precision on the
+    final results, but avoids torch/sentence-transformers entirely."""
     if not candidates:
         return []
+
+    if not ENABLE_RERANKER:
+        return candidates[:top_k]
 
     model = _get_model()
     pairs = [(query, c["content"]) for c in candidates]
