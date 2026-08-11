@@ -5,9 +5,6 @@ databases:
     user: rag_dashboard
 
 services:
-  # FastAPI backend: runs the LangGraph agent pipeline, holds the Chroma
-  # vector index. Django never talks to OpenAI or Chroma directly - it only
-  # proxies to this service over Render's private network.
   - type: web
     name: rag-api
     runtime: docker
@@ -23,8 +20,6 @@ services:
       - key: OPENAI_API_KEY
         sync: false
 
-  # Django dashboard: chat UI, history, corpus browser, upload, and the
-  # stats dashboard. Talks to rag-api over Render's private network.
   - type: web
     name: rag-dashboard
     runtime: python
@@ -39,16 +34,8 @@ services:
         generateValue: true
       - key: DJANGO_DEBUG
         value: "false"
-      # Render defaults to a very new Python (3.14 as of writing) that
-      # psycopg2-binary 2.9.9 has no precompiled wheel for yet - pinning to
-      # 3.12 avoids the "Error loading psycopg2 or psycopg2 module" crash.
       - key: PYTHON_VERSION
         value: "3.12.7"
-      # Render gives every web service a private address of
-      # http://<service-name>:<port> reachable from other services in the
-      # same account/region - rag-api listens on 8000 per the Dockerfile.
-      # If this doesn't resolve after deploy, check rag-api's service page
-      # for its actual internal address and override manually here.
       - key: FASTAPI_BASE_URL
         value: http://rag-api:8000
       - key: DATABASE_URL
