@@ -25,6 +25,11 @@ services:
         generateValue: true
       - key: DJANGO_DEBUG
         value: "false"
+      # Render defaults to a very new Python (3.14 as of writing) that
+      # psycopg2-binary 2.9.9 has no precompiled wheel for yet - pinning to
+      # 3.12 avoids the "Error loading psycopg2 or psycopg2 module" crash.
+      - key: PYTHON_VERSION
+        value: "3.12.7"
       # No FastAPI backend deployed yet - chat/upload will fail until this
       # points at a real, reachable instance. Set it manually here once
       # you deploy rag-api (or point it at wherever FastAPI runs for now).
