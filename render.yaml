@@ -14,7 +14,7 @@ services:
   - type: web
     name: rag-dashboard
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: >-
       pip install -r django_dashboard/requirements.txt &&
       python django_dashboard/manage.py collectstatic --noinput &&
