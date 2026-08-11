@@ -5,12 +5,26 @@ databases:
     user: rag_dashboard
 
 services:
-  # Django dashboard only - chat, history, corpus browser, upload, and the
-  # stats dashboard. FastAPI (the actual LangGraph agent pipeline) is NOT
-  # deployed here. Asking a question or uploading a document will fail
-  # until FASTAPI_BASE_URL below points at a real, reachable FastAPI
-  # instance - Dashboard/History/Browse Corpus work fine without it, since
-  # those only read Django's own database.
+  # FastAPI backend: runs the LangGraph agent pipeline, holds the Chroma
+  # vector index. Django never talks to OpenAI or Chroma directly - it only
+  # proxies to this service over Render's private network.
+  - type: web
+    name: rag-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    healthCheckPath: /docs
+    disk:
+      name: rag-chroma-data
+      mountPath: /app/chroma_db
+      sizeGB: 1
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+
+  # Django dashboard: chat UI, history, corpus browser, upload, and the
+  # stats dashboard. Talks to rag-api over Render's private network.
   - type: web
     name: rag-dashboard
     runtime: python
@@ -30,11 +44,13 @@ services:
       # 3.12 avoids the "Error loading psycopg2 or psycopg2 module" crash.
       - key: PYTHON_VERSION
         value: "3.12.7"
-      # No FastAPI backend deployed yet - chat/upload will fail until this
-      # points at a real, reachable instance. Set it manually here once
-      # you deploy rag-api (or point it at wherever FastAPI runs for now).
+      # Render gives every web service a private address of
+      # http://<service-name>:<port> reachable from other services in the
+      # same account/region - rag-api listens on 8000 per the Dockerfile.
+      # If this doesn't resolve after deploy, check rag-api's service page
+      # for its actual internal address and override manually here.
       - key: FASTAPI_BASE_URL
-        sync: false
+        value: http://rag-api:8000
       - key: DATABASE_URL
         fromDatabase:
           name: rag-db
