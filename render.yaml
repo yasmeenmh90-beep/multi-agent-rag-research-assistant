@@ -1,0 +1,36 @@
+databases:
+  - name: rag-db
+    plan: free
+    databaseName: rag_dashboard
+    user: rag_dashboard
+
+services:
+  # Django dashboard only - chat, history, corpus browser, upload, and the
+  # stats dashboard. FastAPI (the actual LangGraph agent pipeline) is NOT
+  # deployed here. Asking a question or uploading a document will fail
+  # until FASTAPI_BASE_URL below points at a real, reachable FastAPI
+  # instance - Dashboard/History/Browse Corpus work fine without it, since
+  # those only read Django's own database.
+  - type: web
+    name: rag-dashboard
+    runtime: python
+    plan: starter
+    buildCommand: >-
+      pip install -r django_dashboard/requirements.txt &&
+      python django_dashboard/manage.py collectstatic --noinput &&
+      python django_dashboard/manage.py migrate
+    startCommand: gunicorn dashboard.wsgi:application --chdir django_dashboard
+    envVars:
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: "false"
+      # No FastAPI backend deployed yet - chat/upload will fail until this
+      # points at a real, reachable instance. Set it manually here once
+      # you deploy rag-api (or point it at wherever FastAPI runs for now).
+      - key: FASTAPI_BASE_URL
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rag-db
+          property: connectionString
