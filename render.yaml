@@ -18,6 +18,18 @@ services:
     # Upgraded from free (512MB RAM) to pro for real headroom - the free
     # tier is what forced ENABLE_RERANKER off and the conservative upload
     # cap in the first place.
+    disk:
+      name: rag-api-storage
+      mountPath: /app/storage
+      sizeGB: 10
+    # Without this disk, chroma_db/ (never committed to git) and any
+    # newly-uploaded/literature-review-fetched documents would reset to
+    # the image's baked-in corpus on every restart or redeploy. Chroma's
+    # index and the live documents dir both live on this disk now, so
+    # they survive restarts; app/main.py seeds+ingests from the image's
+    # baked-in corpus into this disk automatically the first time it's
+    # empty (see _seed_and_ingest_if_needed), then never repeats that
+    # work on later boots.
     envVars:
       - key: OPENAI_API_KEY
         sync: false
@@ -30,6 +42,10 @@ services:
       # this matches local dev's own default (2048MB/2GB) exactly.
       - key: MAX_UPLOAD_FILE_SIZE_MB
         value: "2048"
+      - key: CHROMA_PERSIST_DIR
+        value: /app/storage/chroma_db
+      - key: DOCUMENTS_DIR
+        value: /app/storage/documents
 
   # Django dashboard: chat UI, history, corpus browser, upload, and the
   # stats dashboard. Talks to rag-api over Render's private network.

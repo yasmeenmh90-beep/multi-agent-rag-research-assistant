@@ -17,7 +17,15 @@ OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
 
 # --- Vector store -------------------------------------------------------
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR", str(BASE_DIR / "chroma_db"))
-DOCUMENTS_DIR = BASE_DIR / "data" / "documents"
+# The corpus baked into the Docker image at build time (see Dockerfile's
+# `COPY data/ ./data/`) - always this exact path, regardless of DOCUMENTS_DIR
+# below, so there's a fixed place to seed *from* on first boot.
+SEED_DOCUMENTS_DIR = BASE_DIR / "data" / "documents"
+# Defaults to the image's baked-in data/documents for local/simple deploys;
+# on Render, this is overridden to a path on the mounted persistent disk so
+# uploaded/ingested documents (including ones added after the image was
+# built) survive restarts instead of resetting to the image's contents.
+DOCUMENTS_DIR = Path(os.getenv("DOCUMENTS_DIR", str(SEED_DOCUMENTS_DIR)))
 
 # --- Chunking -----------------------------------------------------------
 CHUNK_SIZE = 500

@@ -6,6 +6,8 @@ import shutil
 import uuid
 import zipfile
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,7 +15,7 @@ from pydantic import BaseModel
 from app.agents.graph import run_query, app_graph
 from app.agents.hybrid_search import warm_bm25_cache
 from app.agents.reranker import warm_reranker
-from app.config import discover_domains, TRACING_ENABLED, LANGCHAIN_PROJECT, DOCUMENTS_DIR, CHUNK_SIZE, CHUNK_OVERLAP
+from app.config import discover_domains, TRACING_ENABLED, LANGCHAIN_PROJECT, DOCUMENTS_DIR, SEED_DOCUMENTS_DIR, CHROMA_PERSIST_DIR, CHUNK_SIZE, CHUNK_OVERLAP
 from app.ingestion.ingest import ingest_domain
 from app.eval.ragas_eval import run_evaluation
 from app.ingestion.fetch_and_ingest_topic import fetch_and_ingest_topic
@@ -27,16 +29,61 @@ SESSIONS: dict[str, list[dict]] = {}
 MAX_HISTORY_TURNS = 6
 
 ALLOWED_UPLOAD_EXTENSIONS = (".pdf", ".txt", ".md")
-MAX_UPLOAD_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2GB per file - "practically
-# unlimited" per the person's request, but still bounded so a single upload
-# can't exhaust server memory/disk outright
+MAX_UPLOAD_FILE_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_FILE_SIZE_MB", "2048")) * 1024 * 1024
+# Env-driven: Render can set MAX_UPLOAD_FILE_SIZE_MB=150 to stay safe on its
+# 512MB instance; local dev defaults to 2048MB (2GB) if the var is unset.
 MAX_ZIP_MEMBERS = 300  # guard against a maliciously huge/zip-bomb archive
-MAX_ZIP_TOTAL_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024  # 2GB total per zip -
-# without this, a 2GB-per-file allowance times 300 members could claim to
-# extract to 600GB from one small compressed upload (the classic "zip bomb")
+MAX_ZIP_TOTAL_EXTRACTED_BYTES = MAX_UPLOAD_FILE_SIZE_BYTES  # same env-driven cap
+# applies to a zip's *total* extracted content - without this, the per-file
+# allowance times 300 members could add up to hundreds of GB from one small
+# compressed upload (the classic "zip bomb")
+
+
+def _seed_and_ingest_if_needed():
+    """First-boot-only (per persistent disk): if DOCUMENTS_DIR is empty -
+    a fresh disk, or a deploy with no persistent disk at all - copy the
+    corpus baked into the Docker image and fully ingest it, so Chroma
+    isn't empty just because the disk was. A sentinel file on the same
+    disk marks this done, so later restarts (where the disk already has
+    documents *and* embeddings from a prior boot) skip straight to the
+    fast BM25-only warm-up instead of re-ingesting everything - and re-
+    embedding real files every restart, unlike a sentinel check, would
+    also mean real OpenAI embedding-API cost on every single restart."""
+    sentinel = Path(CHROMA_PERSIST_DIR) / ".seeded"
+    if sentinel.exists():
+        return
+
+    documents_dir = Path(DOCUMENTS_DIR)
+    documents_dir.mkdir(parents=True, exist_ok=True)
+    is_empty = not any(documents_dir.iterdir())
+
+    if is_empty and SEED_DOCUMENTS_DIR.exists() and SEED_DOCUMENTS_DIR.resolve() != documents_dir.resolve():
+        print(f"First boot on this disk: seeding {documents_dir} from the image's baked-in corpus at {SEED_DOCUMENTS_DIR} ...")
+        for domain_folder in SEED_DOCUMENTS_DIR.iterdir():
+            if domain_folder.is_dir():
+                shutil.copytree(domain_folder, documents_dir / domain_folder.name, dirs_exist_ok=True)
+
+    domains = discover_domains()
+    if domains:
+        print(f"First boot on this disk: ingesting {domains} into Chroma ...")
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
+        for domain in domains:
+            try:
+                ingest_domain(domain, splitter)
+            except Exception as exc:  # noqa: BLE001
+                print(f"  failed to ingest {domain}: {exc}")
+
+    Path(CHROMA_PERSIST_DIR).mkdir(parents=True, exist_ok=True)
+    sentinel.touch()
+    print("Seeding + ingest complete for this disk - future restarts will skip this step.")
 
 
 def _warm_caches_sync():
+    _seed_and_ingest_if_needed()
+
     domains = discover_domains()
     if domains:
         print(f"Warming BM25 index for domains: {domains} ...")
@@ -57,6 +104,14 @@ async def _warm_caches():
     # Letting the server start accepting connections immediately means the
     # deploy succeeds even while warm-up finishes in the background.
     asyncio.create_task(asyncio.to_thread(_warm_caches_sync))
+
+
+def _format_size(num_bytes: int) -> str:
+    """Human-readable size for error messages - MB below 1GB, GB above."""
+    if num_bytes >= 1024 ** 3:
+        gb = num_bytes / 1024 ** 3
+        return f"{gb:.0f}GB" if gb == int(gb) else f"{gb:.1f}GB"
+    return f"{num_bytes // (1024 ** 2)}MB"
 
 
 class QueryRequest(BaseModel):
@@ -197,7 +252,7 @@ async def upload_documents(
     def _write(filename: str, data: bytes) -> None:
         nonlocal saved
         if len(data) > MAX_UPLOAD_FILE_SIZE_BYTES:
-            failed.append(f"{filename} (too large, max 2GB)")
+            failed.append(f"{filename} (too large, max {_format_size(MAX_UPLOAD_FILE_SIZE_BYTES)})")
             return
         dest = domain_dir / filename
         try:
@@ -230,11 +285,11 @@ async def upload_documents(
                 # or zip-bomb member without spending memory/CPU actually
                 # inflating it first.
                 if member.file_size > MAX_UPLOAD_FILE_SIZE_BYTES:
-                    failed.append(f"{member_name} (too large, max 2GB)")
+                    failed.append(f"{member_name} (too large, max {_format_size(MAX_UPLOAD_FILE_SIZE_BYTES)})")
                     continue
                 total_extracted += member.file_size
                 if total_extracted > MAX_ZIP_TOTAL_EXTRACTED_BYTES:
-                    failed.append(f"{upload.filename}: remaining members skipped (archive exceeds 2GB total extracted)")
+                    failed.append(f"{upload.filename}: remaining members skipped (archive exceeds {_format_size(MAX_ZIP_TOTAL_EXTRACTED_BYTES)} total extracted)")
                     break
                 try:
                     data = zf.read(member)
