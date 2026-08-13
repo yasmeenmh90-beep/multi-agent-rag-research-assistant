@@ -37,8 +37,9 @@
                 </div>
             </div>
 
-            <button id="new-conversation" class="btn-new">+ New conversation</button>
             <a href="{% url 'chat:stats_dashboard' %}" class="btn-secondary">📊 Dashboard</a>
+            <button id="new-conversation" class="btn-new">+ New conversation</button>
+            <a href="{% url 'chat:literature_review' %}" class="btn-secondary">📝 Literature Review</a>
             <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
             <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
             <a href="{% url 'chat:history' %}" class="btn-secondary">🕘 History</a>
@@ -108,7 +109,24 @@
                                 </div>
                                 {% endif %}
 
-                                {% if m.sources %}
+                                {% if m.source_details %}
+                                <div class="trace-section">
+                                    <div class="trace-label">Sources ({{ m.source_details|length }})</div>
+                                    <ul class="trace-list sources-list">
+                                        {% for s in m.source_details %}
+                                            <li class="source-item">
+                                                <button type="button" class="source-toggle" data-target="src-{{ m.id }}-{{ forloop.counter }}">
+                                                    📄 {{ s.source }} <span class="source-domain">({{ s.domain }})</span>
+                                                </button>
+                                                <a href="{% url 'chat:download_source' %}?file={{ s.source }}" target="_blank" class="source-link-icon" title="Open full document">↗</a>
+                                                <div class="source-snippet" id="src-{{ m.id }}-{{ forloop.counter }}" hidden>
+                                                    “{{ s.snippet }}”
+                                                </div>
+                                            </li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                                {% elif m.sources %}
                                 <div class="trace-section">
                                     <div class="trace-label">Sources ({{ m.sources|length }})</div>
                                     <ul class="trace-list sources-list">
@@ -119,6 +137,13 @@
                                 </div>
                                 {% endif %}
                             </details>
+
+                            {% if m.id %}
+                            <div class="feedback-row" data-message-id="{{ m.id }}" data-feedback-url="{% url 'chat:set_feedback' m.id %}">
+                                <button type="button" class="feedback-btn {% if m.feedback == 'up' %}active{% endif %}" data-value="up" title="Good answer">👍</button>
+                                <button type="button" class="feedback-btn {% if m.feedback == 'down' %}active{% endif %}" data-value="down" title="Bad answer">👎</button>
+                            </div>
+                            {% endif %}
                         </div>
                     </div>
                 {% empty %}
@@ -144,7 +169,7 @@
         </main>
     </div>
 
-    <script>window.DJANGO_URLS = {stream: "{% url 'chat:stream_chat' %}", newConversation: "{% url 'chat:new_conversation' %}", downloadSource: "{% url 'chat:download_source' %}"};</script>
+    <script>window.DJANGO_URLS = {stream: "{% url 'chat:stream_chat' %}", newConversation: "{% url 'chat:new_conversation' %}", downloadSource: "{% url 'chat:download_source' %}", setFeedback: "{% url 'chat:set_feedback' 0 %}"};</script>
     <script src="{% static 'chat/js/chat.js' %}?v=13"></script>
 </body>
 </html>

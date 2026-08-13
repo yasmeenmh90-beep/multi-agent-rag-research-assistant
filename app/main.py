@@ -1,7 +1,10 @@
 import asyncio
+import io
 import json
+import os
 import shutil
 import uuid
+import zipfile
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
@@ -13,12 +16,24 @@ from app.agents.reranker import warm_reranker
 from app.config import discover_domains, TRACING_ENABLED, LANGCHAIN_PROJECT, DOCUMENTS_DIR, CHUNK_SIZE, CHUNK_OVERLAP
 from app.ingestion.ingest import ingest_domain
 from app.eval.ragas_eval import run_evaluation
+from app.ingestion.fetch_and_ingest_topic import fetch_and_ingest_topic
+from app.agents.lit_review import generate_literature_review
+from app.citations import format_bibliography
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 app = FastAPI(title="Multi-Agent RAG API")
 
 SESSIONS: dict[str, list[dict]] = {}
 MAX_HISTORY_TURNS = 6
+
+ALLOWED_UPLOAD_EXTENSIONS = (".pdf", ".txt", ".md")
+MAX_UPLOAD_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2GB per file - "practically
+# unlimited" per the person's request, but still bounded so a single upload
+# can't exhaust server memory/disk outright
+MAX_ZIP_MEMBERS = 300  # guard against a maliciously huge/zip-bomb archive
+MAX_ZIP_TOTAL_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024  # 2GB total per zip -
+# without this, a 2GB-per-file allowance times 300 members could claim to
+# extract to 600GB from one small compressed upload (the classic "zip bomb")
 
 
 def _warm_caches_sync():
@@ -55,6 +70,7 @@ class QueryResponse(BaseModel):
     sub_questions: list[str]
     domains_used: list[str]
     sources: list[str]
+    source_details: list[dict] = []
     is_grounded: bool
     session_id: str
 
@@ -77,6 +93,31 @@ class EvalResponse(BaseModel):
     faithfulness_avg: float
     context_precision_avg: float
     per_question: list[EvalQuestionResult]
+
+
+class LitReviewRequest(BaseModel):
+    topic: str
+    max_papers_per_source: int = 15
+    citation_style: str = "apa"  # "apa" or "ieee"
+
+
+class LitReviewPaper(BaseModel):
+    title: str
+    authors: list[str]
+    year: str
+    venue: str
+    ingested: bool
+    citation: str
+
+
+class LitReviewResponse(BaseModel):
+    topic: str
+    domain: str
+    review_text: str
+    num_found: int
+    num_ingested: int
+    papers: list[LitReviewPaper]
+    bibliography: list[str]
 
 
 @app.get("/health")
@@ -114,6 +155,7 @@ def query(req: QueryRequest):
         sub_questions=result.get("sub_questions") or [req.question],
         domains_used=result.get("domains") or [],
         sources=result.get("sources") or [],
+        source_details=result.get("source_details") or [],
         is_grounded=bool(result.get("is_grounded")),
         session_id=session_id,
     )
@@ -131,9 +173,16 @@ async def upload_documents(
     files: list[UploadFile] = File(...),
 ):
     """
-    Lets a user add their own PDFs to a domain (existing or brand new) and
-    ingests them immediately - the domain becomes queryable right after
-    this call returns, no separate script run needed.
+    Lets a user add their own PDFs/text/markdown to a domain (existing or
+    brand new) and ingests them immediately - the domain becomes queryable
+    right after this call returns, no separate script run needed.
+
+    Also accepts .zip archives: each allowed member file inside is
+    extracted and treated exactly like an individually-uploaded file.
+    Member filenames are reduced to their basename only (no directory
+    components) before being written to disk, which prevents a
+    "zip-slip" archive from writing outside the domain folder via a
+    path like "../../etc/passwd" inside the zip entry name.
     """
     domain = domain.strip().lower().replace(" ", "_")
     if not domain:
@@ -145,18 +194,61 @@ async def upload_documents(
     saved = 0
     failed: list[str] = []
 
-    for upload in files:
-        if not upload.filename.lower().endswith((".pdf", ".txt", ".md")):
-            failed.append(upload.filename)
-            continue
-        dest = domain_dir / upload.filename
+    def _write(filename: str, data: bytes) -> None:
+        nonlocal saved
+        if len(data) > MAX_UPLOAD_FILE_SIZE_BYTES:
+            failed.append(f"{filename} (too large, max 2GB)")
+            return
+        dest = domain_dir / filename
         try:
             with open(dest, "wb") as f:
-                shutil.copyfileobj(upload.file, f)
+                f.write(data)
             saved += 1
         except Exception as exc:  # noqa: BLE001
-            print(f"  failed to save {upload.filename}: {exc}")
+            print(f"  failed to save {filename}: {exc}")
+            failed.append(filename)
+
+    for upload in files:
+        name_lower = upload.filename.lower()
+        raw = await upload.read()
+
+        if name_lower.endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                    members = [m for m in zf.infolist() if not m.is_dir()]
+            except zipfile.BadZipFile:
+                failed.append(f"{upload.filename} (not a valid zip)")
+                continue
+
+            total_extracted = 0
+            for member in members[:MAX_ZIP_MEMBERS]:
+                member_name = os.path.basename(member.filename)  # zip-slip guard
+                if not member_name or not member_name.lower().endswith(ALLOWED_UPLOAD_EXTENSIONS):
+                    continue
+                # member.file_size is the *declared* uncompressed size straight
+                # from the zip header - checking it here rejects an oversized
+                # or zip-bomb member without spending memory/CPU actually
+                # inflating it first.
+                if member.file_size > MAX_UPLOAD_FILE_SIZE_BYTES:
+                    failed.append(f"{member_name} (too large, max 2GB)")
+                    continue
+                total_extracted += member.file_size
+                if total_extracted > MAX_ZIP_TOTAL_EXTRACTED_BYTES:
+                    failed.append(f"{upload.filename}: remaining members skipped (archive exceeds 2GB total extracted)")
+                    break
+                try:
+                    data = zf.read(member)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  failed to read {member_name} from {upload.filename}: {exc}")
+                    failed.append(member_name)
+                    continue
+                _write(member_name, data)
+            continue
+
+        if not name_lower.endswith(ALLOWED_UPLOAD_EXTENSIONS):
             failed.append(upload.filename)
+            continue
+        _write(upload.filename, raw)
 
     chunks_added = 0
     if saved:
@@ -188,6 +280,54 @@ def eval_run():
     """
     result = run_evaluation()
     return EvalResponse(**result)
+
+
+@app.post("/literature-review", response_model=LitReviewResponse)
+def literature_review(req: LitReviewRequest):
+    """
+    Given a topic: searches arXiv + Semantic Scholar, downloads whatever
+    open-access PDFs are available, ingests them into a fresh domain, and
+    generates a structured literature review with per-claim citations and
+    a formatted bibliography.
+
+    This is a slow, synchronous endpoint (search + downloads + ingestion +
+    LLM synthesis can take a couple of minutes for 15-30 papers) - FastAPI
+    runs regular `def` endpoints in a threadpool, so it won't block other
+    requests, but the client should expect a long wait, not a quick response.
+    """
+    if req.citation_style not in ("apa", "ieee"):
+        raise HTTPException(status_code=400, detail="citation_style must be 'apa' or 'ieee'")
+
+    fetch_result = fetch_and_ingest_topic(req.topic, max_per_source=req.max_papers_per_source)
+    papers = fetch_result["papers"]
+
+    review = {"review_text": "No papers were successfully ingested for this topic.", "sources_used": []}
+    if fetch_result["num_ingested"] > 0:
+        review = generate_literature_review(req.topic, fetch_result["domain"])
+
+    bibliography = format_bibliography(papers, style=req.citation_style)
+
+    paper_responses = [
+        LitReviewPaper(
+            title=p["title"],
+            authors=p.get("authors", []),
+            year=p.get("year", ""),
+            venue=p.get("venue", ""),
+            ingested=p["ingested"],
+            citation=bibliography[i],
+        )
+        for i, p in enumerate(papers)
+    ]
+
+    return LitReviewResponse(
+        topic=req.topic,
+        domain=fetch_result["domain"],
+        review_text=review["review_text"],
+        num_found=fetch_result["num_found"],
+        num_ingested=fetch_result["num_ingested"],
+        papers=paper_responses,
+        bibliography=bibliography,
+    )
 
 
 @app.post("/query/stream")
@@ -262,6 +402,7 @@ async def query_stream(req: QueryRequest):
             "sub_questions": (final_state or {}).get("sub_questions") or [req.question],
             "domains_used": (final_state or {}).get("domains") or [],
             "sources": (final_state or {}).get("sources") or [],
+            "source_details": (final_state or {}).get("source_details") or [],
             "is_grounded": bool((final_state or {}).get("is_grounded")),
         }
         yield f"data: {json.dumps(done_payload)}\n\n"

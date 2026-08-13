@@ -20,15 +20,19 @@ class Conversation(models.Model):
 class Message(models.Model):
     """One question/answer turn within a conversation, with the metadata
     the agent pipeline returned (sources, domains, grounded status)."""
+    FEEDBACK_CHOICES = [("up", "Thumbs up"), ("down", "Thumbs down")]
+
     conversation = models.ForeignKey(Conversation, related_name="messages", on_delete=models.CASCADE)
     question = models.TextField()
     answer = models.TextField(blank=True, default="")
     sub_questions = models.JSONField(default=list, blank=True)
     domains_used = models.JSONField(default=list, blank=True)
     sources = models.JSONField(default=list, blank=True)
+    source_details = models.JSONField(default=list, blank=True)  # [{source, domain, snippet}]
     is_grounded = models.BooleanField(default=False)
     retried = models.BooleanField(default=False)  # True if the critic rejected
     response_time_s = models.FloatField(default=0)
+    feedback = models.CharField(max_length=4, choices=FEEDBACK_CHOICES, blank=True, default="")
     # the first draft and the rewriter reformulated + re-retrieved before
     # this final answer was produced (detected via an SSE 'restart' event).
     created_at = models.DateTimeField(auto_now_add=True)
@@ -72,3 +76,24 @@ class UploadRecord(models.Model):
 
     def __str__(self):
         return f"{self.domain}: {self.files_saved} files, {self.chunks_added} chunks"
+
+
+class LiteratureReview(models.Model):
+    """One generated literature review, saved in full so the Dashboard can
+    show a count and a recent list, and so a past review can be reopened
+    without calling FastAPI (and re-searching/re-ingesting) again."""
+    topic = models.CharField(max_length=300)
+    domain = models.CharField(max_length=150)
+    citation_style = models.CharField(max_length=4, default="apa")
+    num_found = models.IntegerField(default=0)
+    num_ingested = models.IntegerField(default=0)
+    review_text = models.TextField(blank=True, default="")
+    papers = models.JSONField(default=list, blank=True)
+    bibliography = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.topic} ({self.num_ingested} papers)"

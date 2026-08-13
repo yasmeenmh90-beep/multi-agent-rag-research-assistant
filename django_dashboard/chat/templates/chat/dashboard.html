@@ -25,6 +25,7 @@
         .dash-row { display: grid; gap: 1rem; margin-bottom: 1rem; min-width: 0; }
         .dash-row-3 { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
         .dash-row-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+        .dash-row-3col { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .dash-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; }
         .dash-panel h3 { font-size: 0.9rem; font-weight: 600; margin: 0 0 1rem; }
         .dash-list-row { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
@@ -49,7 +50,7 @@
         .dash-scroll { max-height: 340px; overflow-y: auto; padding-right: 4px; }
         .dash-scroll::-webkit-scrollbar { width: 6px; }
         .dash-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-        @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, 1fr); } .dash-row-3, .dash-row-2 { grid-template-columns: 1fr; } }
+        @media (max-width: 1100px) { .dash-grid { grid-template-columns: repeat(2, 1fr); } .dash-row-3, .dash-row-2, .dash-row-3col { grid-template-columns: 1fr; } }
     </style>
 </head>
 <body>
@@ -91,9 +92,11 @@
                 </div>
             </div>
             <a href="{% url 'chat:stats_dashboard' %}" class="btn-secondary" style="border-color:var(--accent); color:var(--accent);">📊 Dashboard</a>
-            <a href="{% url 'chat:history' %}" class="btn-secondary">🕘 History</a>
+            <a href="{% url 'chat:index' %}" class="btn-secondary">💬 New Conversation</a>
+            <a href="{% url 'chat:literature_review' %}" class="btn-secondary">📝 Literature Review</a>
             <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
             <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
+            <a href="{% url 'chat:history' %}" class="btn-secondary">🕘 History</a>
         </aside>
 
         <main class="main" style="padding: 32px; overflow-y: auto; overflow-x: hidden; min-width: 0;">
@@ -131,6 +134,12 @@
                     <div class="dash-label">Corpus documents</div>
                     <div class="dash-sub">{{ stats.corpus_domain_count }} domains</div>
                 </div>
+                <div class="dash-card">
+                    <div class="dash-card-icon">📝</div>
+                    <div class="dash-value">{{ stats.lit_review_count }}</div>
+                    <div class="dash-label">Literature reviews</div>
+                    <div class="dash-sub">Generated</div>
+                </div>
             </div>
 
             <div class="dash-row dash-row-3">
@@ -159,7 +168,7 @@
                 </div>
             </div>
 
-            <div class="dash-row dash-row-3">
+            <div class="dash-row dash-row-3col">
                 <div class="dash-panel">
                     <h3>Recent conversations</h3>
                     {% for c in recent_conversations %}
@@ -169,6 +178,17 @@
                         </div>
                     {% empty %}
                         <div class="dash-list-row"><span>No conversations yet.</span></div>
+                    {% endfor %}
+                </div>
+                <div class="dash-panel">
+                    <h3>Recent literature reviews</h3>
+                    {% for lr in recent_lit_reviews %}
+                        <div class="dash-list-row">
+                            <a href="{% url 'chat:literature_review_detail' lr.id %}" title="{{ lr.topic }}">{{ lr.topic|truncatechars:36 }}</a>
+                            <span class="dash-count">{{ lr.num_ingested }} papers</span>
+                        </div>
+                    {% empty %}
+                        <div class="dash-list-row"><span>No reviews yet.</span></div>
                     {% endfor %}
                 </div>
                 <div class="dash-panel">

@@ -1,0 +1,284 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Literature Review — Multi-Agent RAG</title>
+    <link rel="icon" type="image/x-icon" href="{% static 'chat/img/favicon.ico' %}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'chat/css/style.css' %}?v=5">
+    <style>
+        .lr-hero { max-width: 880px; margin: 0 auto; padding: 44px 28px 0; }
+        .lr-eyebrow { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; display:flex; align-items:center; gap:8px; }
+        .lr-title { font-size: 1.9rem; font-weight: 700; font-family: var(--sans); margin: 0 0 8px; letter-spacing: -0.01em; }
+        .lr-subtitle { color: var(--text-dim); font-size: 0.94rem; margin: 0 0 28px; max-width: 620px; line-height: 1.5; }
+
+        .lr-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 22px 24px; }
+        .lr-form-row { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+        .lr-form-row > div { flex: 1; min-width: 160px; }
+        .lr-label { display: block; font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 8px; font-weight: 600; }
+        .lr-input, .lr-select {
+            width: 100%; background: var(--bg, #0b0d12); border: 1px solid var(--border); border-radius: 9px;
+            padding: 11px 13px; color: var(--text); font-family: var(--sans); font-size: 0.92rem;
+            transition: border-color 0.15s;
+        }
+        .lr-input:focus, .lr-select:focus { outline: none; border-color: var(--accent); }
+        .lr-submit {
+            padding: 12px 24px; border-radius: 9px; background: var(--accent); color: #08110f;
+            border: none; font-weight: 700; font-size: 0.88rem; cursor: pointer; white-space: nowrap;
+            transition: opacity 0.15s, transform 0.1s;
+        }
+        .lr-submit:hover { opacity: 0.9; }
+        .lr-submit:active { transform: scale(0.98); }
+        .lr-submit:disabled { opacity: 0.55; cursor: not-allowed; }
+        .lr-wait-note { color: var(--text-dim); font-size: 0.78rem; margin-top: 14px; display:flex; align-items:center; gap:7px; }
+
+        .lr-progress { display:none; margin-top: 18px; }
+        .lr-progress.active { display:block; }
+        .lr-progress-steps { display:flex; flex-direction:column; gap: 10px; }
+        .lr-progress-step { display:flex; align-items:center; gap: 10px; font-size: 0.82rem; color: var(--text-dim); opacity: 0.45; transition: opacity 0.3s, color 0.3s; }
+        .lr-progress-step.active { opacity: 1; color: var(--text); }
+        .lr-progress-step.done { opacity: 0.75; color: var(--accent); }
+        .lr-progress-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); flex-shrink:0; }
+        .lr-progress-step.active .lr-progress-dot { background: var(--accent); box-shadow: 0 0 0 4px rgba(var(--accent-rgb, 100,220,180), 0.15); animation: lr-pulse 1.2s ease-in-out infinite; }
+        .lr-progress-step.done .lr-progress-dot { background: var(--accent); }
+        @keyframes lr-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+        .lr-stats { max-width: 880px; margin: 22px auto 0; padding: 0 28px; display: flex; gap: 12px; flex-wrap: wrap; }
+        .lr-stat-card { flex: 1; min-width: 150px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+        .lr-stat-card.lr-domain-card { flex: 2; min-width: 260px; }
+        .lr-stat-card .num { font-family: var(--mono); font-size: 1.5rem; font-weight: 600; color: var(--accent); line-height:1; }
+        .lr-stat-card .label { font-size: 0.72rem; color: var(--text-dim); margin-top: 6px; letter-spacing: 0.02em; }
+        .lr-domain-tag { font-family: var(--mono); font-size: 0.68rem; color: var(--text-dim); line-height: 1.6; }
+        .lr-domain-tag b { color: var(--accent); font-weight: 500; word-break: break-all; overflow-wrap: anywhere; display: inline-block; margin-top: 2px; }
+
+        .lr-doc { max-width: 880px; margin: 26px auto 0; padding: 0 28px 60px; }
+        .lr-doc-card { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 44px 52px; }
+        .lr-doc-title { font-family: var(--sans); font-size: 1.3rem; font-weight: 700; margin: 0 0 6px; }
+        .lr-doc-meta { font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim); margin-bottom: 30px; padding-bottom: 22px; border-bottom: 1px solid var(--border); }
+        .lr-doc-body { font-family: 'Source Serif 4', Georgia, serif; font-size: 1.02rem; line-height: 1.75; color: var(--text); }
+        .lr-doc-body h3 { font-family: var(--sans); font-size: 1.12rem; font-weight: 700; margin: 30px 0 12px; color: var(--text); }
+        .lr-doc-body h3:first-child { margin-top: 0; }
+        .lr-doc-body h4 { font-family: var(--sans); font-size: 0.96rem; font-weight: 600; margin: 22px 0 10px; color: var(--accent); }
+        .lr-doc-body p { margin: 0 0 15px; }
+        .citation-badge {
+            font-family: var(--mono); font-size: 0.72rem; background: var(--accent-dim, rgba(100,220,180,0.12));
+            color: var(--accent); padding: 1px 7px; border-radius: 5px; white-space: nowrap;
+            border: 1px solid rgba(var(--accent-rgb, 100,220,180), 0.25);
+        }
+
+        .lr-actions { display: flex; gap: 10px; margin-top: 32px; padding-top: 24px; border-top: 1px solid var(--border); }
+        .lr-action-btn {
+            display:flex; align-items:center; gap: 7px; padding: 9px 16px; border-radius: 8px;
+            background: var(--panel-raised, rgba(255,255,255,0.04)); border: 1px solid var(--border);
+            color: var(--text); font-size: 0.82rem; font-weight: 600; cursor: pointer; font-family: var(--sans);
+        }
+        .lr-action-btn:hover { border-color: var(--accent); color: var(--accent); }
+        .lr-action-btn.primary { background: var(--accent); color: #08110f; border-color: var(--accent); }
+        .lr-action-btn.primary:hover { opacity: 0.9; color: #08110f; }
+
+        .lr-section-heading { font-family: var(--sans); font-size: 1.02rem; font-weight: 700; margin: 40px 0 14px; display:flex; align-items:center; gap: 8px; }
+        .lr-section-heading .count { font-family: var(--mono); font-weight: 400; color: var(--text-dim); font-size: 0.85rem; }
+        .lr-paper-grid { display: flex; flex-direction: column; gap: 8px; }
+        .lr-paper-card {
+            display: flex; align-items: center; justify-content: space-between; gap: 14px;
+            background: var(--panel-raised, rgba(255,255,255,0.02)); border: 1px solid var(--border);
+            border-radius: 10px; padding: 13px 16px; transition: border-color 0.15s;
+        }
+        .lr-paper-card:hover { border-color: var(--accent); }
+        .lr-paper-title { font-size: 0.86rem; line-height: 1.4; }
+        .lr-paper-year { color: var(--text-dim); font-family: var(--mono); font-size: 0.76rem; margin-left: 4px; }
+        .lr-paper-badge {
+            font-family: var(--mono); font-size: 0.68rem; padding: 4px 10px; border-radius: 999px;
+            white-space: nowrap; flex-shrink: 0; display:flex; align-items:center; gap:5px;
+        }
+        .lr-paper-badge.ingested { background: rgba(var(--accent-rgb, 100,220,180), 0.12); color: var(--accent); border: 1px solid rgba(var(--accent-rgb, 100,220,180), 0.3); }
+        .lr-paper-badge.metadata-only { background: rgba(255,255,255,0.04); color: var(--text-dim); border: 1px solid var(--border); }
+        .lr-paper-badge .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+
+        .lr-bib-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+        .lr-bib-item {
+            display: flex; gap: 12px; font-family: var(--mono); font-size: 0.76rem; line-height: 1.6;
+            color: var(--text-dim); padding: 10px 0; border-bottom: 1px solid var(--border);
+        }
+        .lr-bib-item:last-child { border-bottom: none; }
+        .lr-bib-num { color: var(--accent); flex-shrink: 0; font-weight: 600; }
+
+        .lr-error { background: rgba(230,80,80,0.1); border: 1px solid rgba(230,80,80,0.35); color: #f0a0a0; padding: 12px 16px; border-radius: 10px; margin-bottom: 20px; font-size: 0.85rem; }
+
+        @media (max-width: 720px) {
+            .lr-doc-card { padding: 28px 22px; }
+            .lr-form-row { flex-direction: column; align-items: stretch; }
+        }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <aside class="sidebar">
+            <div class="brand">
+                <span class="brand-mark">◆</span>
+                <div>
+                    <div class="brand-name">Multi-Agent RAG</div>
+                    <div class="brand-sub">7-agent pipeline</div>
+                </div>
+            </div>
+            <a href="{% url 'chat:stats_dashboard' %}" class="btn-secondary">📊 Dashboard</a>
+            <a href="{% url 'chat:index' %}" class="btn-secondary">💬 New Conversation</a>
+            <a href="{% url 'chat:literature_review' %}" class="btn-secondary" style="border-color:var(--accent); color:var(--accent);">📝 Literature Review</a>
+            <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
+            <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary">⬆ Upload documents</a>
+            <a href="{% url 'chat:history' %}" class="btn-secondary">🕘 History</a>
+        </aside>
+
+        <main class="main" style="overflow-y:auto; display:block;">
+            <div class="lr-hero">
+                <div class="lr-eyebrow">✦ Research Assistant</div>
+                <h1 class="lr-title">Literature review generator</h1>
+                <p class="lr-subtitle">Enter a topic — this searches arXiv and Semantic Scholar for papers, ingests the open-access ones, and writes a structured, cited review with a formatted bibliography.</p>
+
+                {% if error %}
+                    <div class="lr-error">{{ error }}</div>
+                {% endif %}
+
+                <div class="lr-panel">
+                    <form method="post" id="lr-form">
+                        {% csrf_token %}
+                        <div class="lr-form-row">
+                            <div style="flex: 2;">
+                                <label class="lr-label">Topic</label>
+                                <input type="text" name="topic" class="lr-input" placeholder="e.g. hybrid retrieval in RAG systems" value="{{ topic|default:'' }}" required>
+                            </div>
+                            <div>
+                                <label class="lr-label">Citation style</label>
+                                <select name="citation_style" class="lr-select">
+                                    <option value="apa" {% if citation_style == 'apa' %}selected{% endif %}>APA</option>
+                                    <option value="ieee" {% if citation_style == 'ieee' %}selected{% endif %}>IEEE</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="lr-label">Max papers/source</label>
+                                <input type="number" name="max_papers" class="lr-input" value="15" min="5" max="30">
+                            </div>
+                            <button type="submit" class="lr-submit" id="lr-submit-btn">Generate review →</button>
+                        </div>
+                    </form>
+
+                    <div class="lr-progress" id="lr-progress">
+                        <div class="lr-progress-steps">
+                            <div class="lr-progress-step" data-step="0"><span class="lr-progress-dot"></span> Searching arXiv &amp; Semantic Scholar</div>
+                            <div class="lr-progress-step" data-step="1"><span class="lr-progress-dot"></span> Downloading open-access PDFs</div>
+                            <div class="lr-progress-step" data-step="2"><span class="lr-progress-dot"></span> Reading &amp; indexing papers</div>
+                            <div class="lr-progress-step" data-step="3"><span class="lr-progress-dot"></span> Writing the review &amp; citations</div>
+                        </div>
+                    </div>
+
+                    <p class="lr-wait-note" id="lr-wait-note">This searches, downloads, and reads papers — it can take a few minutes. The page will wait for it to finish.</p>
+                </div>
+            </div>
+
+            {% if result %}
+                <div class="lr-stats">
+                    <div class="lr-stat-card"><div class="num">{{ result.num_found }}</div><div class="label">Papers found</div></div>
+                    <div class="lr-stat-card"><div class="num">{{ result.num_ingested }}</div><div class="label">Ingested &amp; cited</div></div>
+                    <div class="lr-stat-card lr-domain-card" style="display:flex; align-items:center;"><div class="lr-domain-tag">domain<br><b>{{ result.domain }}</b></div></div>
+                </div>
+
+                <div class="lr-doc">
+                    <div class="lr-doc-card">
+                        <h2 class="lr-doc-title">{{ topic }}</h2>
+                        <div class="lr-doc-meta">Literature review · {{ citation_style|upper }} citations · generated by the multi-agent pipeline</div>
+
+                        <div class="lr-doc-body" id="review-text">{{ review_html }}</div>
+
+                        <div class="lr-actions">
+                            <button type="button" class="lr-action-btn primary" id="copy-review-btn">⧉ Copy review text</button>
+                            <form method="post" action="{% url 'chat:literature_review_download' %}" style="margin:0;">
+                                {% csrf_token %}
+                                <input type="hidden" name="topic" value="{{ topic }}">
+                                <input type="hidden" name="citation_style" value="{{ citation_style }}">
+                                <textarea name="review_text" hidden>{{ result.review_text }}</textarea>
+                                <input type="hidden" name="bibliography_json" value='{{ bibliography_json }}'>
+                                <button type="submit" class="lr-action-btn">⬇ Download PDF</button>
+                            </form>
+                        </div>
+                    </div>
+
+                    <div class="lr-section-heading">Papers found <span class="count">({{ result.papers|length }})</span></div>
+                    <div class="lr-paper-grid">
+                        {% for p in result.papers %}
+                            <div class="lr-paper-card">
+                                <div class="lr-paper-title">{{ p.title }}<span class="lr-paper-year">{{ p.year }}</span></div>
+                                {% if p.ingested %}
+                                    <span class="lr-paper-badge ingested"><span class="dot"></span>read &amp; cited</span>
+                                {% else %}
+                                    <span class="lr-paper-badge metadata-only"><span class="dot"></span>metadata only</span>
+                                {% endif %}
+                            </div>
+                        {% endfor %}
+                    </div>
+
+                    <div class="lr-section-heading">Bibliography <span class="count">({{ citation_style|upper }})</span></div>
+                    <div class="lr-doc-card" style="padding: 26px 30px;">
+                        <ul class="lr-bib-list">
+                            {% for c in result.bibliography %}
+                                <li class="lr-bib-item"><span class="lr-bib-num">{{ forloop.counter }}.</span><span>{{ c }}</span></li>
+                            {% endfor %}
+                        </ul>
+                        <button type="button" class="lr-action-btn" id="copy-bib-btn" style="margin-top:18px;">⧉ Copy bibliography</button>
+                    </div>
+                </div>
+            {% endif %}
+        </main>
+    </div>
+
+    <script>
+        const form = document.getElementById('lr-form');
+        const progress = document.getElementById('lr-progress');
+        const waitNote = document.getElementById('lr-wait-note');
+        const steps = document.querySelectorAll('.lr-progress-step');
+
+        form.addEventListener('submit', function () {
+            const btn = document.getElementById('lr-submit-btn');
+            btn.disabled = true;
+            btn.textContent = 'Generating…';
+            progress.classList.add('active');
+            waitNote.style.display = 'none';
+
+            steps[0].classList.add('active');
+            const timers = [12000, 20000, 15000];
+            let elapsed = 0;
+            timers.forEach((delay, idx) => {
+                elapsed += delay;
+                setTimeout(() => {
+                    if (steps[idx]) { steps[idx].classList.remove('active'); steps[idx].classList.add('done'); }
+                    if (steps[idx + 1]) steps[idx + 1].classList.add('active');
+                }, elapsed);
+            });
+        });
+
+        const copyReviewBtn = document.getElementById('copy-review-btn');
+        if (copyReviewBtn) {
+            copyReviewBtn.addEventListener('click', function () {
+                const text = document.getElementById('review-text').innerText;
+                navigator.clipboard.writeText(text).then(() => {
+                    copyReviewBtn.textContent = '✓ Copied';
+                    setTimeout(() => { copyReviewBtn.textContent = '⧉ Copy review text'; }, 1500);
+                });
+            });
+        }
+
+        const copyBibBtn = document.getElementById('copy-bib-btn');
+        if (copyBibBtn) {
+            copyBibBtn.addEventListener('click', function () {
+                const items = Array.from(document.querySelectorAll('.lr-bib-item')).map(li => li.innerText);
+                navigator.clipboard.writeText(items.join('\n\n')).then(() => {
+                    copyBibBtn.textContent = '✓ Copied';
+                    setTimeout(() => { copyBibBtn.textContent = '⧉ Copy bibliography'; }, 1500);
+                });
+            });
+        }
+    </script>
+</body>
+</html>

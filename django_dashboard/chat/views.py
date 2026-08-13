@@ -5,12 +5,14 @@ from collections import Counter
 
 import requests
 from django.conf import settings
-from django.http import StreamingHttpResponse, JsonResponse, FileResponse, Http404, HttpResponse
+from django.http import StreamingHttpResponse, JsonResponse, FileResponse, Http404, HttpResponse, HttpResponseNotAllowed
 from django.shortcuts import render, get_object_or_404, redirect
+from django.utils.html import escape
+from django.utils.safestring import mark_safe
 from django.views.decorators.csrf import csrf_exempt, ensure_csrf_cookie
 from django.views.decorators.http import require_POST
 
-from .models import Conversation, Message, UploadRecord
+from .models import Conversation, Message, UploadRecord, LiteratureReview
 
 
 @ensure_csrf_cookie
@@ -134,6 +136,205 @@ def export_conversation(request, pk):
     return resp
 
 
+@csrf_exempt
+@require_POST
+def set_feedback(request, pk):
+    """Sets or clears thumbs up/down feedback on a message.
+    POST body: {"feedback": "up" | "down" | ""}"""
+    message = get_object_or_404(Message, pk=pk)
+    body = json.loads(request.body or "{}")
+    value = body.get("feedback", "")
+    if value not in ("up", "down", ""):
+        return JsonResponse({"error": "feedback must be 'up', 'down', or ''"}, status=400)
+    message.feedback = value
+    message.save(update_fields=["feedback"])
+    return JsonResponse({"ok": True, "feedback": message.feedback})
+
+
+def _review_text_to_html(text: str) -> str:
+    """Converts the synthesizer's markdown-ish output (#### / ### headers,
+    blank-line paragraphs, [source.pdf] citation markers) into real HTML
+    instead of showing literal '### Heading' text on the page. Escapes the
+    LLM-generated content first since it's untrusted for HTML purposes."""
+    import re
+
+    lines = text.split("\n")
+    html_parts = []
+    paragraph_buffer = []
+
+    def flush_paragraph():
+        if paragraph_buffer:
+            joined = " ".join(paragraph_buffer)
+            joined = re.sub(
+                r"\[([^\]]+\.pdf)\]",
+                r'<span class="citation-badge">\1</span>',
+                joined,
+            )
+            html_parts.append(f"<p>{joined}</p>")
+            paragraph_buffer.clear()
+
+    for raw_line in lines:
+        line = escape(raw_line.strip())
+        # escape() ran before the citation regex substitution below, so
+        # "[x.pdf]" survives escaping unchanged - safe to pattern-match on.
+        if line.startswith("#### "):
+            flush_paragraph()
+            html_parts.append(f"<h4>{line[5:]}</h4>")
+        elif line.startswith("### "):
+            flush_paragraph()
+            html_parts.append(f"<h3>{line[4:]}</h3>")
+        elif line == "":
+            flush_paragraph()
+        else:
+            paragraph_buffer.append(line)
+
+    flush_paragraph()
+    return mark_safe("\n".join(html_parts))
+
+
+def literature_review(request):
+    """GET: show the topic input form. POST: proxy to FastAPI's
+    /literature-review endpoint (search + ingest + synthesize), which is
+    slow (search + downloads + LLM synthesis) - timeout is generous."""
+    if request.method == "POST":
+        topic = (request.POST.get("topic") or "").strip()
+        citation_style = request.POST.get("citation_style", "apa")
+        max_papers = int(request.POST.get("max_papers", 15))
+
+        if not topic:
+            return render(request, "chat/lit_review.html", {"error": "Please enter a topic."})
+
+        try:
+            resp = requests.post(
+                f"{settings.FASTAPI_BASE_URL}/literature-review",
+                json={
+                    "topic": topic,
+                    "max_papers_per_source": max_papers,
+                    "citation_style": citation_style,
+                },
+                timeout=600,  # search + downloads + synthesis can genuinely take minutes
+            )
+            resp.raise_for_status()
+            result = resp.json()
+        except requests.RequestException as exc:
+            return render(request, "chat/lit_review.html", {
+                "error": f"Literature review generation failed: {exc}",
+                "topic": topic,
+            })
+
+        LiteratureReview.objects.create(
+            topic=topic,
+            domain=result.get("domain", ""),
+            citation_style=citation_style,
+            num_found=result.get("num_found", 0),
+            num_ingested=result.get("num_ingested", 0),
+            review_text=result.get("review_text", ""),
+            papers=result.get("papers", []),
+            bibliography=result.get("bibliography", []),
+        )
+
+        return render(request, "chat/lit_review.html", {
+            "result": result,
+            "review_html": _review_text_to_html(result.get("review_text", "")),
+            "topic": topic,
+            "citation_style": citation_style,
+            "bibliography_json": json.dumps(result.get("bibliography", [])),
+        })
+
+    return render(request, "chat/lit_review.html", {})
+
+
+def literature_review_detail(request, pk):
+    """Reopens a past literature review from the DB - no FastAPI call, no
+    re-search, just redisplays what was already generated and saved."""
+    record = get_object_or_404(LiteratureReview, pk=pk)
+    result = {
+        "domain": record.domain,
+        "num_found": record.num_found,
+        "num_ingested": record.num_ingested,
+        "review_text": record.review_text,
+        "papers": record.papers,
+        "bibliography": record.bibliography,
+    }
+    return render(request, "chat/lit_review.html", {
+        "result": result,
+        "review_html": _review_text_to_html(record.review_text),
+        "topic": record.topic,
+        "citation_style": record.citation_style,
+        "bibliography_json": json.dumps(record.bibliography),
+    })
+
+
+def _sanitize_pdf_text(text: str) -> str:
+    """fpdf2's core fonts don't cover every unicode character an LLM might
+    output (smart quotes, em dashes, ellipsis) - swap them for ASCII
+    equivalents so the PDF doesn't throw a font encoding error."""
+    replacements = {
+        "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
+        "\u2013": "-", "\u2014": "-", "\u2026": "...",
+    }
+    for a, b in replacements.items():
+        text = text.replace(a, b)
+    return text
+
+
+def literature_review_download(request):
+    """POST: formats the already-generated review (resubmitted via hidden
+    form fields on the results page) as a downloadable PDF. Doesn't call
+    FastAPI again - this is pure formatting of data the page already has."""
+    if request.method != "POST":
+        return HttpResponseNotAllowed(["POST"])
+
+    from fpdf import FPDF
+
+    topic = request.POST.get("topic", "Literature Review")
+    review_text = request.POST.get("review_text", "")
+    citation_style = request.POST.get("citation_style", "apa")
+    try:
+        bibliography = json.loads(request.POST.get("bibliography_json", "[]"))
+    except json.JSONDecodeError:
+        bibliography = []
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.multi_cell(0, 10, _sanitize_pdf_text(f"Literature Review: {topic}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "", 11)
+    for line in review_text.splitlines():
+        clean = _sanitize_pdf_text(line)
+        if clean.startswith("#### "):
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.multi_cell(0, 8, clean[5:], new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("Helvetica", "", 11)
+        elif clean.startswith("### "):
+            pdf.set_font("Helvetica", "B", 13)
+            pdf.multi_cell(0, 9, clean[4:], new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("Helvetica", "", 11)
+        elif clean.strip() == "":
+            pdf.ln(3)
+        else:
+            pdf.multi_cell(0, 6, clean, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.ln(6)
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.multi_cell(0, 9, f"Bibliography ({citation_style.upper()})", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    for i, citation in enumerate(bibliography, 1):
+        pdf.multi_cell(0, 6, _sanitize_pdf_text(f"{i}. {citation}"), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+
+    pdf_bytes = bytes(pdf.output())
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+    safe_topic = "".join(c if c.isalnum() or c in " -_" else "" for c in topic)[:60].strip()
+    safe_topic = safe_topic.replace(" ", "_") or "literature_review"
+    response["Content-Disposition"] = f'attachment; filename="{safe_topic}.pdf"'
+    return response
+
+
 def download_source(request):
     """Serves a source PDF for viewing/download, found by filename across
     the corpus's domain subfolders. Usage: /source/?file=<filename>"""
@@ -176,17 +377,31 @@ def _known_domains():
     return sorted(names)
 
 
+MAX_UPLOAD_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # keep in sync with FastAPI's limit
+
+
 def upload_corpus(request):
-    """GET: show the upload form. POST: proxy the files to FastAPI's
-    /corpus/upload endpoint, which saves + immediately ingests them, then
-    save an UploadRecord so the page has a real upload history."""
+    """GET: show the upload form. POST: proxy the files (or pasted text,
+    wrapped as a virtual .txt file) to FastAPI's /corpus/upload endpoint,
+    which saves + immediately ingests them, then save an UploadRecord so
+    the page has a real upload history."""
     if request.method == "POST":
         domain = (request.POST.get("domain") or "").strip()
         files = request.FILES.getlist("files")
+        pasted_text = (request.POST.get("pasted_text") or "").strip()
+        pasted_title = (request.POST.get("pasted_title") or "").strip()
 
-        if not domain or not files:
+        if not domain or not (files or pasted_text):
             return render(request, "chat/upload.html", {
-                "error": "Please provide a domain name and at least one file.",
+                "error": "Please provide a domain name, and at least one file or some pasted text.",
+                "upload_history": UploadRecord.objects.all()[:20],
+                "known_domains": _known_domains(),
+            })
+
+        oversized = [f.name for f in files if f.size > MAX_UPLOAD_FILE_SIZE_BYTES]
+        if oversized:
+            return render(request, "chat/upload.html", {
+                "error": f"These files exceed the 2GB limit: {', '.join(oversized)}",
                 "upload_history": UploadRecord.objects.all()[:20],
                 "known_domains": _known_domains(),
             })
@@ -195,6 +410,13 @@ def upload_corpus(request):
             ("files", (f.name, f.read(), f.content_type or "application/pdf"))
             for f in files
         ]
+
+        if pasted_text:
+            safe_title = "".join(c if c.isalnum() or c in " -_" else "" for c in pasted_title)[:60].strip()
+            safe_title = safe_title.replace(" ", "_") or "pasted_text"
+            files_payload.append(
+                ("files", (f"{safe_title}.txt", pasted_text.encode("utf-8"), "text/plain"))
+            )
 
         try:
             resp = requests.post(
@@ -332,17 +554,19 @@ def stream_chat(request):
                 conversation.title = question[:80]
             conversation.save()
 
-            Message.objects.create(
+            message = Message.objects.create(
                 conversation=conversation,
                 question=question,
                 answer=answer_text,
                 sub_questions=final_event.get("sub_questions", []),
                 domains_used=final_event.get("domains_used", []),
                 sources=final_event.get("sources", []),
+                source_details=final_event.get("source_details", []),
                 is_grounded=bool(final_event.get("is_grounded")),
                 retried=saw_restart,
                 response_time_s=elapsed_s,
             )
+            yield f"data: {json.dumps({'type': 'message_id', 'id': message.id})}\n\n"
 
         # Extra client-side event (our own, not from FastAPI) so the live
         # UI can show the timing without waiting for a page reload.
@@ -412,6 +636,8 @@ def stats_dashboard(request):
     response_times.reverse()
 
     recent_conversations = Conversation.objects.all()[:6]
+    lit_review_count = LiteratureReview.objects.count()
+    recent_lit_reviews = LiteratureReview.objects.all()[:5]
 
     context = {
         "stats": {
@@ -422,8 +648,10 @@ def stats_dashboard(request):
             "ungrounded_count": ungrounded_count,
             "corpus_total_docs": corpus_total_docs,
             "corpus_domain_count": corpus_domain_count,
+            "lit_review_count": lit_review_count,
         },
         "recent_conversations": recent_conversations,
+        "recent_lit_reviews": recent_lit_reviews,
         "trending_domains": trending_domains,
         "popular_sources": popular_sources,
         # Passed as plain Python objects - the template feeds these to

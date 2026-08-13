@@ -195,21 +195,86 @@ function listEl(items, cls) {
     return ul;
 }
 
-function sourceListEl(items) {
+function sourceListEl(items, bubbleId) {
     const ul = document.createElement('ul');
     ul.className = 'trace-list sources-list';
-    items.forEach((item) => {
+    items.forEach((item, i) => {
         const li = document.createElement('li');
-        const a = document.createElement('a');
-        a.href = `${window.DJANGO_URLS.downloadSource}?file=${encodeURIComponent(item)}`;
-        a.target = '_blank';
-        a.className = 'source-link';
-        a.textContent = item;
-        li.appendChild(a);
+
+        // item can be a plain filename string (older cached state) or a
+        // {source, domain, snippet} object - handle both.
+        if (typeof item === 'string') {
+            const a = document.createElement('a');
+            a.href = `${window.DJANGO_URLS.downloadSource}?file=${encodeURIComponent(item)}`;
+            a.target = '_blank';
+            a.className = 'source-link';
+            a.textContent = item;
+            li.appendChild(a);
+        } else {
+            li.className = 'source-item';
+            const targetId = `src-${bubbleId}-${i}`;
+
+            const toggle = document.createElement('button');
+            toggle.type = 'button';
+            toggle.className = 'source-toggle';
+            toggle.dataset.target = targetId;
+            toggle.innerHTML = `📄 ${item.source} <span class="source-domain">(${item.domain})</span>`;
+            li.appendChild(toggle);
+
+            const link = document.createElement('a');
+            link.href = `${window.DJANGO_URLS.downloadSource}?file=${encodeURIComponent(item.source)}`;
+            link.target = '_blank';
+            link.className = 'source-link-icon';
+            link.title = 'Open full document';
+            link.textContent = '↗';
+            li.appendChild(link);
+
+            const snippet = document.createElement('div');
+            snippet.className = 'source-snippet';
+            snippet.id = targetId;
+            snippet.hidden = true;
+            snippet.textContent = `“${item.snippet}”`;
+            li.appendChild(snippet);
+        }
         ul.appendChild(li);
     });
     return ul;
 }
+
+// Expand/collapse source snippet previews - one delegated listener covers
+// both server-rendered (page load) and JS-rendered (live stream) sources.
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.source-toggle');
+    if (!btn) return;
+    const target = document.getElementById(btn.dataset.target);
+    if (target) target.hidden = !target.hidden;
+});
+
+// Feedback thumbs up/down - delegated so it works for both server-rendered
+// history and freshly streamed messages.
+document.addEventListener('click', async (e) => {
+    const btn = e.target.closest('.feedback-btn');
+    if (!btn) return;
+    const row = btn.closest('.feedback-row');
+    const url = row.dataset.feedbackUrl;
+    if (!url) return;
+
+    const isActive = btn.classList.contains('active');
+    const value = isActive ? '' : btn.dataset.value;  // click again to clear
+
+    try {
+        const resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': getCookie('csrftoken') },
+            body: JSON.stringify({ feedback: value }),
+        });
+        if (!resp.ok) throw new Error('Failed to save feedback');
+        row.querySelectorAll('.feedback-btn').forEach((b) => b.classList.remove('active'));
+        if (value) btn.classList.add('active');
+    } catch (err) {
+        showToast('Could not save feedback');
+    }
+});
 
 function chipsEl(items) {
     const div = document.createElement('div');
@@ -250,7 +315,8 @@ function renderMeta(bubbleRow, event, retried, responseTimeSeconds) {
 
     const domains = event.domains_used || [];
     const subQuestions = event.sub_questions || [];
-    const sources = event.sources || [];
+    const sourceDetails = event.source_details || [];
+    const sources = sourceDetails.length ? sourceDetails : (event.sources || []);
 
     if (domains.length) {
         details.appendChild(traceSection('Domains routed', chipsEl(domains)));
@@ -259,8 +325,22 @@ function renderMeta(bubbleRow, event, retried, responseTimeSeconds) {
         details.appendChild(traceSection('Sub-questions (planner)', listEl(subQuestions)));
     }
     if (sources.length) {
-        details.appendChild(traceSection(`Sources (${sources.length})`, sourceListEl(sources)));
+        const bubbleId = bubbleRow.dataset.bubbleId || Math.random().toString(36).slice(2, 9);
+        bubbleRow.dataset.bubbleId = bubbleId;
+        details.appendChild(traceSection(`Sources (${sources.length})`, sourceListEl(sources, bubbleId)));
     }
+}
+
+function addFeedbackRow(bubbleRow, feedbackUrl) {
+    const bubble = bubbleRow.querySelector('.bubble');
+    if (bubble.querySelector('.feedback-row')) return;
+    const row = document.createElement('div');
+    row.className = 'feedback-row';
+    row.dataset.feedbackUrl = feedbackUrl;
+    row.innerHTML = `
+        <button type="button" class="feedback-btn" data-value="up" title="Good answer">👍</button>
+        <button type="button" class="feedback-btn" data-value="down" title="Bad answer">👎</button>`;
+    bubble.appendChild(row);
 }
 
 async function sendMessage(question) {
@@ -346,6 +426,9 @@ async function sendMessage(question) {
             } else if (event.type === 'conversation_id') {
                 conversationIdField.value = event.id;
                 history.replaceState(null, '', '?c=' + event.id);
+            } else if (event.type === 'message_id') {
+                const url = window.DJANGO_URLS.setFeedback.replace('/0/feedback/', `/${event.id}/feedback/`);
+                addFeedbackRow(assistantRow, url);
             }
         }
     }

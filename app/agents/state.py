@@ -20,5 +20,7 @@ class GraphState(TypedDict, total=False):
     retry_count: int
     final_answer: str
     sources: list[str]
+    source_details: list[dict]  # [{source, domain, snippet}] - richer version
+                                 # of `sources`, used for citation previews
     explain_simply: bool        # if True, synthesizer answers in
                                  # beginner-friendly plain language

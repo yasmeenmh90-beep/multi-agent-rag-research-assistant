@@ -12,6 +12,8 @@
     <style>
         .up-title { font-size: 1.6rem; font-weight: 700; font-family: var(--sans); margin: 0 0 6px; }
         .up-subtitle { color: var(--text-dim); font-size: 0.9rem; margin: 0 0 24px; }
+        .up-tab { padding: 8px 16px; border-radius: 8px; background: var(--panel); border: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+        .up-tab.active { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
         .dropzone { border: 2px dashed var(--border); border-radius: 12px; padding: 48px 24px; text-align: center; transition: border-color 0.15s, background 0.15s; }
         .dropzone.dragging { border-color: var(--accent); background: var(--accent-dim); }
         .dropzone-icon { font-size: 2rem; margin-bottom: 12px; color: var(--text-dim); }
@@ -48,6 +50,8 @@
                 </div>
             </div>
             <a href="{% url 'chat:stats_dashboard' %}" class="btn-secondary">📊 Dashboard</a>
+            <a href="{% url 'chat:index' %}" class="btn-secondary">💬 New Conversation</a>
+            <a href="{% url 'chat:literature_review' %}" class="btn-secondary">📝 Literature Review</a>
             <a href="{% url 'chat:corpus' %}" class="btn-secondary">📚 Browse corpus</a>
             <a href="{% url 'chat:upload_corpus' %}" class="btn-secondary" style="border-color:var(--accent); color:var(--accent);">⬆ Upload documents</a>
             <a href="{% url 'chat:history' %}" class="btn-secondary">🕘 History</a>
@@ -56,7 +60,7 @@
         <main class="main" style="display:flex; align-items:center; justify-content:center; overflow-y:auto;">
             <div class="corpus-body" style="max-width: 640px; width: 100%; padding: 40px 24px;">
                 <h1 class="up-title">Upload documents</h1>
-                <p class="up-subtitle">Ingest PDFs, text, or markdown files into a corpus domain.</p>
+                <p class="up-subtitle">Ingest PDFs, text, markdown, or zip archives into a corpus domain — or paste text directly.</p>
 
                 {% if error %}
                     <div class="corpus-warning">{{ error }}</div>
@@ -79,20 +83,34 @@
                     </div>
                 {% endif %}
 
+                <div class="up-tabs" style="display:flex; gap:8px; margin-bottom:16px;">
+                    <button type="button" class="up-tab active" id="tab-files" onclick="switchUploadTab('files')">📁 Upload files</button>
+                    <button type="button" class="up-tab" id="tab-paste" onclick="switchUploadTab('paste')">📋 Paste text</button>
+                </div>
+
                 <form method="post" enctype="multipart/form-data" id="upload-form">
                     {% csrf_token %}
 
+                    <div id="panel-files">
                     <div class="dropzone" id="dropzone">
                         <div class="dropzone-icon">⬆</div>
                         <div class="dropzone-text">Drag &amp; drop files here</div>
-                        <div class="dropzone-hint">PDF, TXT, or MD · up to 25MB each</div>
+                        <div class="dropzone-hint">PDF, TXT, MD, or ZIP · up to 2GB each</div>
                         <label class="browse-btn">
                             Browse files
-                            <input type="file" id="files-input" name="files" multiple accept=".pdf,.txt,.md" style="display:none;">
+                            <input type="file" id="files-input" name="files" multiple accept=".pdf,.txt,.md,.zip" style="display:none;">
                         </label>
                     </div>
 
                     <div id="selected-files"></div>
+                    </div>
+
+                    <div id="panel-paste" style="display:none;">
+                        <label class="up-label" for="pasted_title">Title (used as the filename)</label>
+                        <input type="text" id="pasted_title" name="pasted_title" class="up-input" placeholder="e.g. meeting notes" style="margin-bottom:12px;">
+                        <label class="up-label" for="pasted_text">Paste text</label>
+                        <textarea id="pasted_text" name="pasted_text" class="up-input" rows="10" placeholder="Paste or type any amount of text here — it gets chunked and indexed just like an uploaded document." style="resize:vertical; font-family:var(--sans); line-height:1.5;"></textarea>
+                    </div>
 
                     <div class="up-form-row">
                         <div>
@@ -127,6 +145,24 @@
     </div>
 
     <script>
+        function switchUploadTab(which) {
+            const filesPanel = document.getElementById('panel-files');
+            const pastePanel = document.getElementById('panel-paste');
+            const tabFiles = document.getElementById('tab-files');
+            const tabPaste = document.getElementById('tab-paste');
+            if (which === 'files') {
+                filesPanel.style.display = '';
+                pastePanel.style.display = 'none';
+                tabFiles.classList.add('active');
+                tabPaste.classList.remove('active');
+            } else {
+                filesPanel.style.display = 'none';
+                pastePanel.style.display = '';
+                tabFiles.classList.remove('active');
+                tabPaste.classList.add('active');
+            }
+        }
+
         const dropzone = document.getElementById('dropzone');
         const filesInput = document.getElementById('files-input');
         const selectedFiles = document.getElementById('selected-files');
@@ -160,10 +196,20 @@
         }
 
         function addFiles(fileList) {
-            const allowed = /\.(pdf|txt|md)$/i;
+            const allowed = /\.(pdf|txt|md|zip)$/i;
+            const maxBytes = 2 * 1024 * 1024 * 1024;
+            const oversized = [];
             Array.from(fileList).forEach((f) => {
-                if (allowed.test(f.name)) currentFiles.push(f);
+                if (!allowed.test(f.name)) return;
+                if (f.size > maxBytes) {
+                    oversized.push(f.name);
+                    return;
+                }
+                currentFiles.push(f);
             });
+            if (oversized.length) {
+                alert(`These files exceed 2GB and were skipped: ${oversized.join(', ')}`);
+            }
             syncInput();
             renderFiles();
         }

@@ -59,4 +59,25 @@ def synthesize(state: GraphState) -> GraphState:
     })
 
     sources = sorted({r["source"] for r in state.get("retrieved", [])})
-    return {**state, "draft_answer": draft, "sources": sources}
+
+    # Richer version for citation previews: one entry per unique source,
+    # with a short snippet of the actual chunk text so the UI can show
+    # "here's the passage this came from" without opening the whole PDF.
+    # If a source has multiple retrieved chunks, we keep the first one -
+    # good enough for a preview, not meant to be exhaustive.
+    seen = set()
+    source_details = []
+    for r in state.get("retrieved", []):
+        if r["source"] in seen:
+            continue
+        seen.add(r["source"])
+        snippet = r["content"].strip().replace("\n", " ")
+        if len(snippet) > 280:
+            snippet = snippet[:280].rsplit(" ", 1)[0] + "..."
+        source_details.append({
+            "source": r["source"],
+            "domain": r["domain"],
+            "snippet": snippet,
+        })
+
+    return {**state, "draft_answer": draft, "sources": sources, "source_details": source_details}

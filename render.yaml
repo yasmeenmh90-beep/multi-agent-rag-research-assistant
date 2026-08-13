@@ -13,15 +13,11 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    plan: free
+    plan: pro
     healthCheckPath: /docs
-    # No persistent disk: Render's free tier does not support them at all
-    # ("disks are not supported for free tier services"). This means the
-    # Chroma vector index lives only on this container's local, ephemeral
-    # disk - every restart or redeploy wipes it back to empty, and you'll
-    # need to re-upload/re-ingest your corpus through the Upload page each
-    # time. The only real fix is upgrading rag-api specifically to a paid
-    # plan that supports disks; rag-dashboard can stay free either way.
+    # Upgraded from free (512MB RAM) to pro for real headroom - the free
+    # tier is what forced ENABLE_RERANKER off and the conservative upload
+    # cap in the first place.
     envVars:
       - key: OPENAI_API_KEY
         sync: false
@@ -30,13 +26,17 @@ services:
       # "true" once rag-api is upgraded to an instance with more headroom.
       - key: ENABLE_RERANKER
         value: "false"
+      # Was capped down for the free tier's 512MB RAM ceiling - now on Pro,
+      # this matches local dev's own default (2048MB/2GB) exactly.
+      - key: MAX_UPLOAD_FILE_SIZE_MB
+        value: "2048"
 
   # Django dashboard: chat UI, history, corpus browser, upload, and the
   # stats dashboard. Talks to rag-api over Render's private network.
   - type: web
     name: rag-dashboard
     runtime: python
-    plan: free
+    plan: pro
     buildCommand: >-
       pip install -r django_dashboard/requirements.txt &&
       python django_dashboard/manage.py collectstatic --noinput &&
@@ -59,6 +59,12 @@ services:
       # for its actual internal address and override manually here.
       - key: FASTAPI_BASE_URL
         value: http://rag-api:8000
+      # Must match rag-api's MAX_UPLOAD_FILE_SIZE_MB - Django checks and
+      # rejects oversized files itself before ever forwarding to rag-api,
+      # so if these two values drift apart, Django would accept a file
+      # that FastAPI then rejects anyway, after wasting the transfer.
+      - key: MAX_UPLOAD_FILE_SIZE_MB
+        value: "2048"
       - key: DATABASE_URL
         fromDatabase:
           name: rag-db
