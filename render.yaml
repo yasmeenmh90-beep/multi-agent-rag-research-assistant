@@ -13,7 +13,7 @@ services:
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
-    plan: pro
+    plan: standard
     healthCheckPath: /docs
     # Upgraded from free (512MB RAM) to pro for real headroom - the free
     # tier is what forced ENABLE_RERANKER off and the conservative upload
@@ -52,7 +52,7 @@ services:
   - type: web
     name: rag-dashboard
     runtime: python
-    plan: pro
+    plan: starter
     buildCommand: >-
       pip install -r django_dashboard/requirements.txt &&
       python django_dashboard/manage.py collectstatic --noinput &&
