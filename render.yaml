@@ -74,7 +74,7 @@ services:
       # If this doesn't resolve after deploy, check rag-api's service page
       # for its actual internal address and override manually here.
       - key: FASTAPI_BASE_URL
-        value: http://rag-api:8000
+        value: https://rag-api-7kfa.onrender.com
       # Must match rag-api's MAX_UPLOAD_FILE_SIZE_MB - Django checks and
       # rejects oversized files itself before ever forwarding to rag-api,
       # so if these two values drift apart, Django would accept a file
