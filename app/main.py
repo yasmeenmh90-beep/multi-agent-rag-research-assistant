@@ -388,227 +388,81 @@ def literature_review(req: LitReviewRequest):
 @app.post("/query/stream")
 async def query_stream(req: QueryRequest):
     """
-    Server-Sent Events endpoint.
+    Server-Sent Events endpoint. Streams only the synthesizer agent's
+    tokens (not the router/planner/critic's internal LLM calls) as they're
+    generated, so the client sees the answer appear word-by-word.
 
-    Streams:
-      - token: synthesizer output
-      - restart: emitted when the synthesizer retries
-      - done: final RAG metadata
-      - error: pipeline error
+    If the critic rejects the draft and the rewriter triggers a retry, the
+    synthesizer runs a second time - we detect that (a new LLM run_id for
+    the same node) and emit a "restart" event so the client clears the
+    partial answer instead of showing two answers stitched together.
+
+    Event types sent as `data: {...}\\n\\n`:
+      - {"type": "token", "content": "..."}   - one streamed token
+      - {"type": "restart"}                    - discard streamed text so far
+      - {"type": "done", ...}                  - final metadata (sources,
+                                                  domains, grounded, etc.)
     """
-
     if not req.question.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="question must not be empty"
-        )
+        raise HTTPException(status_code=400, detail="question must not be empty")
 
     session_id = req.session_id or str(uuid.uuid4())
     history = SESSIONS.get(session_id, [])
 
     async def event_generator():
-
         initial_state = {
             "question": req.question,
             "chat_history": history,
             "retry_count": 0,
             "explain_simply": req.explain_simply,
         }
-
         trace_config = {
             "run_name": "multi_agent_rag_query",
             "tags": ["multi-agent-rag"],
-            "metadata": {
-                "session_id": session_id
-            },
+            "metadata": {"session_id": session_id},
         }
 
         current_synth_run_id = None
-        final_state = {}
+        final_state = None
 
-        try:
-            # Immediately tell the client that the connection is alive.
-            yield ": connected\n\n"
+        async for event in app_graph.astream_events(
+            initial_state, version="v2", config=trace_config
+        ):
+            kind = event["event"]
+            node = (event.get("metadata") or {}).get("langgraph_node")
 
-            async for event in app_graph.astream_events(
-                initial_state,
-                version="v2",
-                config=trace_config,
-            ):
+            if kind == "on_chat_model_start" and node == "synthesizer":
+                run_id = event["run_id"]
+                if current_synth_run_id is not None and run_id != current_synth_run_id:
+                    yield f"data: {json.dumps({'type': 'restart'})}\n\n"
+                current_synth_run_id = run_id
 
-                kind = event.get("event")
-                metadata = event.get("metadata") or {}
-                node = metadata.get("langgraph_node")
+            elif kind == "on_chat_model_stream" and node == "synthesizer":
+                chunk = event["data"]["chunk"]
+                token = getattr(chunk, "content", "") or ""
+                if token:
+                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
-                # -------------------------------------------------
-                # Synthesizer started
-                # -------------------------------------------------
-                if (
-                    kind == "on_chat_model_start"
-                    and node == "synthesizer"
-                ):
+            elif kind == "on_chain_end" and node == "finalize":
+                final_state = event["data"]["output"]
 
-                    run_id = event.get("run_id")
+        answer = (final_state or {}).get("final_answer") or ""
 
-                    if (
-                        current_synth_run_id is not None
-                        and run_id != current_synth_run_id
-                    ):
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "restart"
-                            })
-                            + "\n\n"
-                        )
+        history_new = history + [{"question": req.question, "answer": answer}]
+        SESSIONS[session_id] = history_new[-MAX_HISTORY_TURNS:]
 
-                    current_synth_run_id = run_id
+        done_payload = {
+            "type": "done",
+            "session_id": session_id,
+            "sub_questions": (final_state or {}).get("sub_questions") or [req.question],
+            "domains_used": (final_state or {}).get("domains") or [],
+            "sources": (final_state or {}).get("sources") or [],
+            "source_details": (final_state or {}).get("source_details") or [],
+            "is_grounded": bool((final_state or {}).get("is_grounded")),
+        }
+        yield f"data: {json.dumps(done_payload)}\n\n"
 
-                # -------------------------------------------------
-                # Synthesizer streaming tokens
-                # -------------------------------------------------
-                elif (
-                    kind == "on_chat_model_stream"
-                    and node == "synthesizer"
-                ):
-
-                    chunk = event.get("data", {}).get("chunk")
-
-                    if chunk is None:
-                        continue
-
-                    token = getattr(
-                        chunk,
-                        "content",
-                        ""
-                    ) or ""
-
-                    # Some LangChain providers can return
-                    # content as a list of blocks.
-                    if isinstance(token, list):
-                        text_parts = []
-
-                        for block in token:
-                            if isinstance(block, dict):
-                                text = block.get("text")
-                                if text:
-                                    text_parts.append(text)
-                            elif isinstance(block, str):
-                                text_parts.append(block)
-
-                        token = "".join(text_parts)
-
-                    if token:
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "token",
-                                "content": token,
-                            })
-                            + "\n\n"
-                        )
-
-                # -------------------------------------------------
-                # Final graph state
-                # -------------------------------------------------
-                elif (
-                    kind == "on_chain_end"
-                    and node == "finalize"
-                ):
-
-                    output = event.get("data", {}).get("output")
-
-                    if isinstance(output, dict):
-                        final_state = output
-
-            # -----------------------------------------------------
-            # Final answer
-            # -----------------------------------------------------
-
-            answer = final_state.get("final_answer") or ""
-
-            # Save conversation history
-            history_new = history + [
-                {
-                    "question": req.question,
-                    "answer": answer,
-                }
-            ]
-
-            SESSIONS[session_id] = (
-                history_new[-MAX_HISTORY_TURNS:]
-            )
-
-            # -----------------------------------------------------
-            # Final metadata
-            # -----------------------------------------------------
-
-            done_payload = {
-                "type": "done",
-                "session_id": session_id,
-
-                "sub_questions": (
-                    final_state.get("sub_questions")
-                    or [req.question]
-                ),
-
-                "domains_used": (
-                    final_state.get("domains")
-                    or []
-                ),
-
-                "sources": (
-                    final_state.get("sources")
-                    or []
-                ),
-
-                "source_details": (
-                    final_state.get("source_details")
-                    or []
-                ),
-
-                "is_grounded": bool(
-                    final_state.get("is_grounded")
-                ),
-            }
-
-            yield (
-                "data: "
-                + json.dumps(done_payload)
-                + "\n\n"
-            )
-
-            yield "data: [DONE]\n\n"
-
-        except Exception as exc:
-
-            print(
-                f"[query/stream] ERROR "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-            error_payload = {
-                "type": "error",
-                "message": str(exc),
-            }
-
-            yield (
-                "data: "
-                + json.dumps(error_payload)
-                + "\n\n"
-            )
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
-    
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
