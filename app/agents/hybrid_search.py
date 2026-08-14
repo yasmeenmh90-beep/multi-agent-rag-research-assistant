@@ -35,8 +35,14 @@ def _get_bm25_index(domain: str):
         # the exact same corpus the dense retriever sees - no separate
         # ingestion path to keep in sync.
         raw = store._collection.get(include=["documents", "metadatas"])
-        texts = raw.get("documents") or []
-        metadatas = raw.get("metadatas") or []
+        raw_texts = raw.get("documents") or []
+        raw_metadatas = raw.get("metadatas") or []
+        # Same null/blank filtering as _dense_search - a malformed source
+        # PDF can leave a None or empty-string chunk sitting in Chroma,
+        # which would otherwise crash _tokenize()'s .lower() call on None.
+        pairs = [(t, m) for t, m in zip(raw_texts, raw_metadatas) if t and t.strip()]
+        texts = [t for t, _ in pairs]
+        metadatas = [m for _, m in pairs]
 
         bm25 = BM25Okapi([_tokenize(t) for t in texts]) if texts else None
         _bm25_cache[domain] = (bm25, texts, metadatas)
@@ -46,8 +52,28 @@ def _get_bm25_index(domain: str):
 
 def _dense_search(domain: str, query: str, k: int) -> list[dict]:
     store = get_vectorstore(domain)
-    docs = store.similarity_search(query, k=k)
-    return [{"content": d.page_content, "metadata": d.metadata} for d in docs]
+    # Deliberately not using store.similarity_search() here: LangChain
+    # builds a Document(page_content=...) for every match internally, and
+    # that constructor rejects None outright ("none is not an allowed
+    # value") - so a single malformed chunk already sitting in Chroma
+    # (from a badly-parsed PDF) crashes the *entire* query, not just that
+    # one result. Querying the raw collection instead lets us filter out
+    # any null/blank entries ourselves before they're ever wrapped in a
+    # Document, so one bad chunk degrades gracefully instead of taking
+    # the whole request down.
+    query_embedding = store._embedding_function.embed_query(query)
+    raw = store._collection.query(
+        query_embeddings=[query_embedding],
+        n_results=k,
+        include=["documents", "metadatas"],
+    )
+    docs = raw.get("documents", [[]])[0]
+    metadatas = raw.get("metadatas", [[]])[0]
+    return [
+        {"content": doc, "metadata": meta or {}}
+        for doc, meta in zip(docs, metadatas)
+        if doc and doc.strip()
+    ]
 
 
 def _sparse_search(domain: str, query: str, k: int) -> list[dict]:
