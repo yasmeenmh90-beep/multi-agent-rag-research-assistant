@@ -388,26 +388,175 @@ def literature_review(req: LitReviewRequest):
 @app.post("/query/stream")
 async def query_stream(req: QueryRequest):
     """
-    Server-Sent Events endpoint. Streams only the synthesizer agent's
-    tokens (not the router/planner/critic's internal LLM calls) as they're
-    generated, so the client sees the answer appear word-by-word.
-
-    If the critic rejects the draft and the rewriter triggers a retry, the
-    synthesizer runs a second time - we detect that (a new LLM run_id for
-    the same node) and emit a "restart" event so the client clears the
-    partial answer instead of showing two answers stitched together.
-
-    Event types sent as `data: {...}\\n\\n`:
-      - {"type": "token", "content": "..."}   - one streamed token
-      - {"type": "restart"}                    - discard streamed text so far
-      - {"type": "done", ...}                  - final metadata (sources,
-                                                  domains, grounded, etc.)
+    Server-Sent Events endpoint.
+    Streams synthesizer tokens and sends final metadata when complete.
     """
+
     if not req.question.strip():
-        raise HTTPException(status_code=400, detail="question must not be empty")
+        raise HTTPException(
+            status_code=400,
+            detail="question must not be empty"
+        )
 
     session_id = req.session_id or str(uuid.uuid4())
     history = SESSIONS.get(session_id, [])
+
+    async def event_generator():
+        initial_state = {
+            "question": req.question,
+            "chat_history": history,
+            "retry_count": 0,
+            "explain_simply": req.explain_simply,
+        }
+
+        trace_config = {
+            "run_name": "multi_agent_rag_query",
+            "tags": ["multi-agent-rag"],
+            "metadata": {
+                "session_id": session_id
+            },
+        }
+
+        current_synth_run_id = None
+        final_state = None
+
+        try:
+            # Send an immediate SSE event.
+            # This is important for keeping the Render connection active
+            # while the RAG pipeline is doing retrieval/planning/etc.
+            yield ": connected\n\n"
+
+            async for event in app_graph.astream_events(
+                initial_state,
+                version="v2",
+                config=trace_config,
+            ):
+                kind = event.get("event")
+                metadata = event.get("metadata") or {}
+                node = metadata.get("langgraph_node")
+
+                # Synthesizer started
+                if kind == "on_chat_model_start" and node == "synthesizer":
+
+                    run_id = event.get("run_id")
+
+                    if (
+                        current_synth_run_id is not None
+                        and run_id != current_synth_run_id
+                    ):
+                        yield (
+                            f"data: {json.dumps({'type': 'restart'})}\n\n"
+                        )
+
+                    current_synth_run_id = run_id
+
+                # Synthesizer token
+                elif (
+                    kind == "on_chat_model_stream"
+                    and node == "synthesizer"
+                ):
+                    chunk = event["data"]["chunk"]
+
+                    token = getattr(
+                        chunk,
+                        "content",
+                        ""
+                    ) or ""
+
+                    if token:
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {
+                                    "type": "token",
+                                    "content": token,
+                                }
+                            )
+                            + "\n\n"
+                        )
+
+                # Final graph state
+                elif (
+                    kind == "on_chain_end"
+                    and node == "finalize"
+                ):
+                    final_state = event["data"]["output"]
+
+            # Make sure we have a state
+            final_state = final_state or {}
+
+            answer = final_state.get("final_answer") or ""
+
+            # Save conversation history
+            history_new = history + [
+                {
+                    "question": req.question,
+                    "answer": answer,
+                }
+            ]
+
+            SESSIONS[session_id] = history_new[-MAX_HISTORY_TURNS:]
+
+            # Final metadata event
+            done_payload = {
+                "type": "done",
+                "session_id": session_id,
+                "sub_questions": (
+                    final_state.get("sub_questions")
+                    or [req.question]
+                ),
+                "domains_used": (
+                    final_state.get("domains")
+                    or []
+                ),
+                "sources": (
+                    final_state.get("sources")
+                    or []
+                ),
+                "source_details": (
+                    final_state.get("source_details")
+                    or []
+                ),
+                "is_grounded": bool(
+                    final_state.get("is_grounded")
+                ),
+            }
+
+            yield (
+                "data: "
+                + json.dumps(done_payload)
+                + "\n\n"
+            )
+
+            # Tell the client the stream is finished
+            yield "data: [DONE]\n\n"
+
+        except Exception as exc:
+            print(
+                f"[query/stream] ERROR: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+            error_payload = {
+                "type": "error",
+                "message": str(exc),
+            }
+
+            yield (
+                "data: "
+                + json.dumps(error_payload)
+                + "\n\n"
+            )
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
     async def event_generator():
         initial_state = {
