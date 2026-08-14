@@ -9,7 +9,7 @@ services:
   # vector index. Django never talks to OpenAI or Chroma directly - it only
   # proxies to this service over Render's private network.
   - type: web
-    name: rag-api
+    name: rag-api-7kfa
     runtime: docker
     dockerfilePath: ./Dockerfile
     dockerContext: .
