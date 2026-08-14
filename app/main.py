@@ -389,7 +389,12 @@ def literature_review(req: LitReviewRequest):
 async def query_stream(req: QueryRequest):
     """
     Server-Sent Events endpoint.
-    Streams synthesizer tokens and sends final metadata when complete.
+
+    Streams:
+      - token: synthesizer output
+      - restart: emitted when the synthesizer retries
+      - done: final RAG metadata
+      - error: pipeline error
     """
 
     if not req.question.strip():
@@ -402,6 +407,7 @@ async def query_stream(req: QueryRequest):
     history = SESSIONS.get(session_id, [])
 
     async def event_generator():
+
         initial_state = {
             "question": req.question,
             "chat_history": history,
@@ -418,12 +424,10 @@ async def query_stream(req: QueryRequest):
         }
 
         current_synth_run_id = None
-        final_state = None
+        final_state = {}
 
         try:
-            # Send an immediate SSE event.
-            # This is important for keeping the Render connection active
-            # while the RAG pipeline is doing retrieval/planning/etc.
+            # Immediately tell the client that the connection is alive.
             yield ": connected\n\n"
 
             async for event in app_graph.astream_events(
@@ -431,12 +435,18 @@ async def query_stream(req: QueryRequest):
                 version="v2",
                 config=trace_config,
             ):
+
                 kind = event.get("event")
                 metadata = event.get("metadata") or {}
                 node = metadata.get("langgraph_node")
 
+                # -------------------------------------------------
                 # Synthesizer started
-                if kind == "on_chat_model_start" and node == "synthesizer":
+                # -------------------------------------------------
+                if (
+                    kind == "on_chat_model_start"
+                    and node == "synthesizer"
+                ):
 
                     run_id = event.get("run_id")
 
@@ -445,17 +455,27 @@ async def query_stream(req: QueryRequest):
                         and run_id != current_synth_run_id
                     ):
                         yield (
-                            f"data: {json.dumps({'type': 'restart'})}\n\n"
+                            "data: "
+                            + json.dumps({
+                                "type": "restart"
+                            })
+                            + "\n\n"
                         )
 
                     current_synth_run_id = run_id
 
-                # Synthesizer token
+                # -------------------------------------------------
+                # Synthesizer streaming tokens
+                # -------------------------------------------------
                 elif (
                     kind == "on_chat_model_stream"
                     and node == "synthesizer"
                 ):
-                    chunk = event["data"]["chunk"]
+
+                    chunk = event.get("data", {}).get("chunk")
+
+                    if chunk is None:
+                        continue
 
                     token = getattr(
                         chunk,
@@ -463,27 +483,47 @@ async def query_stream(req: QueryRequest):
                         ""
                     ) or ""
 
+                    # Some LangChain providers can return
+                    # content as a list of blocks.
+                    if isinstance(token, list):
+                        text_parts = []
+
+                        for block in token:
+                            if isinstance(block, dict):
+                                text = block.get("text")
+                                if text:
+                                    text_parts.append(text)
+                            elif isinstance(block, str):
+                                text_parts.append(block)
+
+                        token = "".join(text_parts)
+
                     if token:
                         yield (
                             "data: "
-                            + json.dumps(
-                                {
-                                    "type": "token",
-                                    "content": token,
-                                }
-                            )
+                            + json.dumps({
+                                "type": "token",
+                                "content": token,
+                            })
                             + "\n\n"
                         )
 
+                # -------------------------------------------------
                 # Final graph state
+                # -------------------------------------------------
                 elif (
                     kind == "on_chain_end"
                     and node == "finalize"
                 ):
-                    final_state = event["data"]["output"]
 
-            # Make sure we have a state
-            final_state = final_state or {}
+                    output = event.get("data", {}).get("output")
+
+                    if isinstance(output, dict):
+                        final_state = output
+
+            # -----------------------------------------------------
+            # Final answer
+            # -----------------------------------------------------
 
             answer = final_state.get("final_answer") or ""
 
@@ -495,28 +535,38 @@ async def query_stream(req: QueryRequest):
                 }
             ]
 
-            SESSIONS[session_id] = history_new[-MAX_HISTORY_TURNS:]
+            SESSIONS[session_id] = (
+                history_new[-MAX_HISTORY_TURNS:]
+            )
 
-            # Final metadata event
+            # -----------------------------------------------------
+            # Final metadata
+            # -----------------------------------------------------
+
             done_payload = {
                 "type": "done",
                 "session_id": session_id,
+
                 "sub_questions": (
                     final_state.get("sub_questions")
                     or [req.question]
                 ),
+
                 "domains_used": (
                     final_state.get("domains")
                     or []
                 ),
+
                 "sources": (
                     final_state.get("sources")
                     or []
                 ),
+
                 "source_details": (
                     final_state.get("source_details")
                     or []
                 ),
+
                 "is_grounded": bool(
                     final_state.get("is_grounded")
                 ),
@@ -528,12 +578,12 @@ async def query_stream(req: QueryRequest):
                 + "\n\n"
             )
 
-            # Tell the client the stream is finished
             yield "data: [DONE]\n\n"
 
         except Exception as exc:
+
             print(
-                f"[query/stream] ERROR: "
+                f"[query/stream] ERROR "
                 f"{type(exc).__name__}: {exc}"
             )
 
@@ -552,7 +602,7 @@ async def query_stream(req: QueryRequest):
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
