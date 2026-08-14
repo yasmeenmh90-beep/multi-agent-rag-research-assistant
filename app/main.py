@@ -64,6 +64,7 @@ def _seed_and_ingest_if_needed():
                 shutil.copytree(domain_folder, documents_dir / domain_folder.name, dirs_exist_ok=True)
 
     domains = discover_domains()
+    all_succeeded = True
     if domains:
         print(f"First boot on this disk: ingesting {domains} into Chroma ...")
         splitter = RecursiveCharacterTextSplitter(
@@ -75,6 +76,18 @@ def _seed_and_ingest_if_needed():
                 ingest_domain(domain, splitter)
             except Exception as exc:  # noqa: BLE001
                 print(f"  failed to ingest {domain}: {exc}")
+                all_succeeded = False
+
+    if not all_succeeded:
+        # Don't write the sentinel on a partial/full failure - writing it
+        # unconditionally was the original bug: a transient failure (rate
+        # limit, network hiccup) would still mark this disk as "done",
+        # permanently skipping ingestion on every future restart and
+        # leaving Chroma empty (or partially empty) forever. Leaving the
+        # sentinel unwritten means the next restart retries the domains
+        # that failed - copytree/ingest_domain are safe to repeat.
+        print("Seeding + ingest had failures - sentinel NOT written, will retry on next restart.")
+        return
 
     Path(CHROMA_PERSIST_DIR).mkdir(parents=True, exist_ok=True)
     sentinel.touch()
@@ -388,247 +401,81 @@ def literature_review(req: LitReviewRequest):
 @app.post("/query/stream")
 async def query_stream(req: QueryRequest):
     """
-    Server-Sent Events endpoint.
+    Server-Sent Events endpoint. Streams only the synthesizer agent's
+    tokens (not the router/planner/critic's internal LLM calls) as they're
+    generated, so the client sees the answer appear word-by-word.
 
-    Streams:
-      - agent/node trace events
-      - synthesizer tokens
-      - final metadata
-      - errors
+    If the critic rejects the draft and the rewriter triggers a retry, the
+    synthesizer runs a second time - we detect that (a new LLM run_id for
+    the same node) and emit a "restart" event so the client clears the
+    partial answer instead of showing two answers stitched together.
+
+    Event types sent as `data: {...}\\n\\n`:
+      - {"type": "token", "content": "..."}   - one streamed token
+      - {"type": "restart"}                    - discard streamed text so far
+      - {"type": "done", ...}                  - final metadata (sources,
+                                                  domains, grounded, etc.)
     """
-
     if not req.question.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="question must not be empty",
-        )
+        raise HTTPException(status_code=400, detail="question must not be empty")
 
     session_id = req.session_id or str(uuid.uuid4())
     history = SESSIONS.get(session_id, [])
 
     async def event_generator():
-
         initial_state = {
             "question": req.question,
             "chat_history": history,
             "retry_count": 0,
             "explain_simply": req.explain_simply,
         }
-
         trace_config = {
             "run_name": "multi_agent_rag_query",
             "tags": ["multi-agent-rag"],
-            "metadata": {
-                "session_id": session_id,
-            },
+            "metadata": {"session_id": session_id},
         }
 
-        final_state = {}
         current_synth_run_id = None
+        final_state = None
 
-        try:
-            # ---------------------------------------------------------
-            # Tell frontend that connection is alive
-            # ---------------------------------------------------------
-            yield ": connected\n\n"
+        async for event in app_graph.astream_events(
+            initial_state, version="v2", config=trace_config
+        ):
+            kind = event["event"]
+            node = (event.get("metadata") or {}).get("langgraph_node")
 
-            # ---------------------------------------------------------
-            # Stream LangGraph events
-            # ---------------------------------------------------------
-            async for event in app_graph.astream_events(
-                initial_state,
-                version="v2",
-                config=trace_config,
-            ):
+            if kind == "on_chat_model_start" and node == "synthesizer":
+                run_id = event["run_id"]
+                if current_synth_run_id is not None and run_id != current_synth_run_id:
+                    yield f"data: {json.dumps({'type': 'restart'})}\n\n"
+                current_synth_run_id = run_id
 
-                kind = event.get("event")
-                metadata = event.get("metadata") or {}
-                data = event.get("data") or {}
+            elif kind == "on_chat_model_stream" and node == "synthesizer":
+                chunk = event["data"]["chunk"]
+                token = getattr(chunk, "content", "") or ""
+                if token:
+                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
-                node = (
-                    metadata.get("langgraph_node")
-                    or metadata.get("node")
-                    or metadata.get("langgraph_step")
-                )
+            elif kind == "on_chain_end" and node == "finalize":
+                final_state = event["data"]["output"]
 
-                # -----------------------------------------------------
-                # DEBUG LOGGING
-                # -----------------------------------------------------
-                print(
-                    f"[TRACE] event={kind} node={node}",
-                    flush=True,
-                )
+        answer = (final_state or {}).get("final_answer") or ""
 
-                # -----------------------------------------------------
-                # SEND AGENT TRACE TO FRONTEND
-                # -----------------------------------------------------
-                if node:
-                    trace_payload = {
-                        "type": "agent_trace",
-                        "node": node,
-                        "event": kind,
-                    }
+        history_new = history + [{"question": req.question, "answer": answer}]
+        SESSIONS[session_id] = history_new[-MAX_HISTORY_TURNS:]
 
-                    yield (
-                        "data: "
-                        + json.dumps(trace_payload)
-                        + "\n\n"
-                    )
+        done_payload = {
+            "type": "done",
+            "session_id": session_id,
+            "sub_questions": (final_state or {}).get("sub_questions") or [req.question],
+            "domains_used": (final_state or {}).get("domains") or [],
+            "sources": (final_state or {}).get("sources") or [],
+            "source_details": (final_state or {}).get("source_details") or [],
+            "is_grounded": bool((final_state or {}).get("is_grounded")),
+        }
+        yield f"data: {json.dumps(done_payload)}\n\n"
 
-                # -----------------------------------------------------
-                # SYNTHESIZER START
-                # -----------------------------------------------------
-                if (
-                    kind == "on_chat_model_start"
-                    and node == "synthesizer"
-                ):
-
-                    run_id = event.get("run_id")
-
-                    if (
-                        current_synth_run_id is not None
-                        and run_id != current_synth_run_id
-                    ):
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "restart"
-                            })
-                            + "\n\n"
-                        )
-
-                    current_synth_run_id = run_id
-
-                # -----------------------------------------------------
-                # SYNTHESIZER STREAMING TOKENS
-                # -----------------------------------------------------
-                elif (
-                    kind == "on_chat_model_stream"
-                    and node == "synthesizer"
-                ):
-
-                    chunk = data.get("chunk")
-
-                    token = ""
-
-                    if chunk is not None:
-                        token = getattr(
-                            chunk,
-                            "content",
-                            "",
-                        ) or ""
-
-                    if token:
-
-                        yield (
-                            "data: "
-                            + json.dumps({
-                                "type": "token",
-                                "content": token,
-                            })
-                            + "\n\n"
-                        )
-
-                # -----------------------------------------------------
-                # FINAL GRAPH STATE
-                # -----------------------------------------------------
-                elif (
-                    kind == "on_chain_end"
-                    and node == "finalize"
-                ):
-
-                    final_state = data.get("output") or {}
-
-            # ---------------------------------------------------------
-            # FINAL ANSWER
-            # ---------------------------------------------------------
-            answer = final_state.get("final_answer") or ""
-
-            # ---------------------------------------------------------
-            # SAVE CHAT HISTORY
-            # ---------------------------------------------------------
-            history_new = history + [
-                {
-                    "question": req.question,
-                    "answer": answer,
-                }
-            ]
-
-            SESSIONS[session_id] = (
-                history_new[-MAX_HISTORY_TURNS:]
-            )
-
-            # ---------------------------------------------------------
-            # DONE EVENT
-            # ---------------------------------------------------------
-            done_payload = {
-                "type": "done",
-                "session_id": session_id,
-
-                "sub_questions": (
-                    final_state.get("sub_questions")
-                    or [req.question]
-                ),
-
-                "domains_used": (
-                    final_state.get("domains")
-                    or []
-                ),
-
-                "sources": (
-                    final_state.get("sources")
-                    or []
-                ),
-
-                "source_details": (
-                    final_state.get("source_details")
-                    or []
-                ),
-
-                "is_grounded": bool(
-                    final_state.get("is_grounded")
-                ),
-            }
-
-            yield (
-                "data: "
-                + json.dumps(done_payload)
-                + "\n\n"
-            )
-
-            # ---------------------------------------------------------
-            # END OF STREAM
-            # ---------------------------------------------------------
-            yield "data: [DONE]\n\n"
-
-        except Exception as exc:
-
-            print(
-                f"[query/stream] ERROR: "
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-
-            error_payload = {
-                "type": "error",
-                "message": str(exc),
-            }
-
-            yield (
-                "data: "
-                + json.dumps(error_payload)
-                + "\n\n"
-            )
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":
