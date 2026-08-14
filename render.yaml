@@ -15,9 +15,10 @@ services:
     dockerContext: .
     plan: standard
     healthCheckPath: /docs
-    # Upgraded from free (512MB RAM) to pro for real headroom - the free
-    # tier is what forced ENABLE_RERANKER off and the conservative upload
-    # cap in the first place.
+    # Standard (2GB RAM, 1 CPU, ~$25/mo) - enough headroom to safely run
+    # the cross-encoder reranker for a stronger demo, without Pro's ~$85/mo
+    # cost. Suspend or delete this service after judging/submission ends
+    # to stop billing - Render bills per-second while a service is active.
     disk:
       name: rag-api-storage
       mountPath: /app/storage
@@ -33,15 +34,17 @@ services:
     envVars:
       - key: OPENAI_API_KEY
         sync: false
-      # Off by default: the cross-encoder reranker needs sentence-transformers
-      # + torch, which alone can exceed the free tier's 512MB RAM. Flip to
-      # "true" once rag-api is upgraded to an instance with more headroom.
+      # Safe to enable on Standard's 2GB - the cross-encoder model
+      # (~90MB, plus sentence-transformers/torch overhead) fits
+      # comfortably now, unlike on a 512MB Starter/free instance.
       - key: ENABLE_RERANKER
-        value: "false"
-      # Was capped down for the free tier's 512MB RAM ceiling - now on Pro,
-      # this matches local dev's own default (2048MB/2GB) exactly.
+        value: "true"
+      # Raised from 150 (conservative for 512MB) - still well under the
+      # full 2GB RAM, since the file gets copied through memory more than
+      # once during the Django-to-FastAPI proxy step. Both Django and
+      # FastAPI must agree on this value (see rag-dashboard below).
       - key: MAX_UPLOAD_FILE_SIZE_MB
-        value: "2048"
+        value: "500"
       - key: CHROMA_PERSIST_DIR
         value: /app/storage/chroma_db
       - key: DOCUMENTS_DIR
@@ -52,12 +55,21 @@ services:
   - type: web
     name: rag-dashboard
     runtime: python
-    plan: starter
+    plan: free
+    # Just serves the UI and proxies to rag-api - no ML dependencies, no
+    # heavy memory needs, so this stays on free while rag-api (which does
+    # the actual embedding/retrieval work) gets the paid Starter tier.
     buildCommand: >-
       pip install -r django_dashboard/requirements.txt &&
       python django_dashboard/manage.py collectstatic --noinput &&
       python django_dashboard/manage.py migrate
-    startCommand: gunicorn dashboard.wsgi:application --chdir django_dashboard
+    startCommand: gunicorn dashboard.wsgi:application --chdir django_dashboard --timeout 600
+    # Default gunicorn worker timeout is 30s - far too short for the
+    # Literature Review view, which proxies to FastAPI and waits (up to
+    # 600s, matching the requests.post timeout in views.py) while it
+    # searches, downloads, and synthesizes. Without this flag, gunicorn
+    # kills the worker as "unresponsive" long before that legitimate work
+    # finishes, producing a 500 error mid-request.
     envVars:
       - key: DJANGO_SECRET_KEY
         generateValue: true
@@ -74,13 +86,13 @@ services:
       # If this doesn't resolve after deploy, check rag-api's service page
       # for its actual internal address and override manually here.
       - key: FASTAPI_BASE_URL
-        value: https://rag-api-7kfa.onrender.com
+        value: http://rag-api:8000
       # Must match rag-api's MAX_UPLOAD_FILE_SIZE_MB - Django checks and
       # rejects oversized files itself before ever forwarding to rag-api,
       # so if these two values drift apart, Django would accept a file
       # that FastAPI then rejects anyway, after wasting the transfer.
       - key: MAX_UPLOAD_FILE_SIZE_MB
-        value: "2048"
+        value: "500"
       - key: DATABASE_URL
         fromDatabase:
           name: rag-db
