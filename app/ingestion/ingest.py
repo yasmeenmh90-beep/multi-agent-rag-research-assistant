@@ -49,6 +49,14 @@ def ingest_domain(domain: str, splitter: RecursiveCharacterTextSplitter) -> tupl
         all_docs.extend(docs)
 
     chunks = splitter.split_documents(all_docs)
+    # Malformed PDFs (the "Ignoring wrong pointing object" warnings during
+    # loading are the tell) can produce chunks with blank or whitespace-only
+    # text. Chroma will happily store these, but on retrieval an empty
+    # string can come back as None, which crashes langchain's Document
+    # model ("none is not an allowed value") the moment that chunk is
+    # retrieved - so these are filtered out here, before they're ever
+    # embedded, rather than trying to handle it at query time.
+    chunks = [c for c in chunks if c.page_content and c.page_content.strip()]
     if chunks:
         add_documents(domain, chunks)
 
