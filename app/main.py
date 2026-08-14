@@ -608,60 +608,7 @@ async def query_stream(req: QueryRequest):
         },
     )
 
-    async def event_generator():
-        initial_state = {
-            "question": req.question,
-            "chat_history": history,
-            "retry_count": 0,
-            "explain_simply": req.explain_simply,
-        }
-        trace_config = {
-            "run_name": "multi_agent_rag_query",
-            "tags": ["multi-agent-rag"],
-            "metadata": {"session_id": session_id},
-        }
-
-        current_synth_run_id = None
-        final_state = None
-
-        async for event in app_graph.astream_events(
-            initial_state, version="v2", config=trace_config
-        ):
-            kind = event["event"]
-            node = (event.get("metadata") or {}).get("langgraph_node")
-
-            if kind == "on_chat_model_start" and node == "synthesizer":
-                run_id = event["run_id"]
-                if current_synth_run_id is not None and run_id != current_synth_run_id:
-                    yield f"data: {json.dumps({'type': 'restart'})}\n\n"
-                current_synth_run_id = run_id
-
-            elif kind == "on_chat_model_stream" and node == "synthesizer":
-                chunk = event["data"]["chunk"]
-                token = getattr(chunk, "content", "") or ""
-                if token:
-                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-
-            elif kind == "on_chain_end" and node == "finalize":
-                final_state = event["data"]["output"]
-
-        answer = (final_state or {}).get("final_answer") or ""
-
-        history_new = history + [{"question": req.question, "answer": answer}]
-        SESSIONS[session_id] = history_new[-MAX_HISTORY_TURNS:]
-
-        done_payload = {
-            "type": "done",
-            "session_id": session_id,
-            "sub_questions": (final_state or {}).get("sub_questions") or [req.question],
-            "domains_used": (final_state or {}).get("domains") or [],
-            "sources": (final_state or {}).get("sources") or [],
-            "source_details": (final_state or {}).get("source_details") or [],
-            "is_grounded": bool((final_state or {}).get("is_grounded")),
-        }
-        yield f"data: {json.dumps(done_payload)}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    
 
 
 if __name__ == "__main__":
