@@ -493,90 +493,280 @@ def new_conversation(request):
 @require_POST
 def stream_chat(request):
     """
-    Proxies to the FastAPI backend's /query/stream SSE endpoint, forwarding
-    tokens straight through to the browser as they arrive, and - once the
-    stream finishes - saves the finished Q&A turn (including how long it
-    took) into this conversation.
+    Proxies the browser request to FastAPI's /query/stream SSE endpoint.
+
+    Important:
+    - Uses a long upstream timeout because the RAG pipeline can take time.
+    - Streams FastAPI events directly to the browser.
+    - Saves the completed Q&A to Django once the FastAPI stream finishes.
     """
-    body = json.loads(request.body or "{}")
+    try:
+        body = json.loads(request.body or "{}")
+    except json.JSONDecodeError:
+        return JsonResponse(
+            {"error": "Invalid JSON request body"},
+            status=400,
+        )
+
     question = (body.get("question") or "").strip()
     conversation_id = body.get("conversation_id")
     explain_simply = bool(body.get("explain_simply", False))
 
     if not question:
-        return JsonResponse({"error": "question must not be empty"}, status=400)
+        return JsonResponse(
+            {"error": "question must not be empty"},
+            status=400,
+        )
 
-    conversation = get_object_or_404(Conversation, pk=conversation_id) if conversation_id else Conversation.objects.create()
+    conversation = (
+        get_object_or_404(Conversation, pk=conversation_id)
+        if conversation_id
+        else Conversation.objects.create()
+    )
 
     def event_stream():
         start_time = time.monotonic()
 
-        payload = {"question": question, "explain_simply": explain_simply}
+        payload = {
+            "question": question,
+            "explain_simply": explain_simply,
+        }
+
         if conversation.session_id:
             payload["session_id"] = conversation.session_id
 
-        resp = requests.post(
-            f"{settings.FASTAPI_BASE_URL}/query/stream",
-            json=payload,
-            stream=True,
-            timeout=180,
-        )
+        resp = None
 
-        answer_text = ""
-        final_event = None
-        saw_restart = False
-
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith("data: "):
-                continue
-
-            yield line + "\n\n"
-
-            try:
-                event = json.loads(line[len("data: "):])
-            except json.JSONDecodeError:
-                continue
-
-            if event.get("type") == "restart":
-                answer_text = ""
-                saw_restart = True
-            elif event.get("type") == "token":
-                answer_text += event.get("content", "")
-            elif event.get("type") == "done":
-                final_event = event
-
-        elapsed_s = round(time.monotonic() - start_time, 1)
-
-        if final_event:
-            if not conversation.session_id:
-                conversation.session_id = final_event.get("session_id", "")
-            if conversation.title in ("", "New conversation"):
-                conversation.title = question[:80]
-            conversation.save()
-
-            message = Message.objects.create(
-                conversation=conversation,
-                question=question,
-                answer=answer_text,
-                sub_questions=final_event.get("sub_questions", []),
-                domains_used=final_event.get("domains_used", []),
-                sources=final_event.get("sources", []),
-                source_details=final_event.get("source_details", []),
-                is_grounded=bool(final_event.get("is_grounded")),
-                retried=saw_restart,
-                response_time_s=elapsed_s,
+        try:
+            # ---------------------------------------------------------
+            # Connect to FastAPI
+            # ---------------------------------------------------------
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "status",
+                    "message": "Connecting to the agent..."
+                })
+                + "\n\n"
             )
-            yield f"data: {json.dumps({'type': 'message_id', 'id': message.id})}\n\n"
 
-        # Extra client-side event (our own, not from FastAPI) so the live
-        # UI can show the timing without waiting for a page reload.
-        yield f"data: {json.dumps({'type': 'response_time', 'seconds': elapsed_s})}\n\n"
-        yield f"data: {json.dumps({'type': 'conversation_id', 'id': conversation.id})}\n\n"
+            resp = requests.post(
+                f"{settings.FASTAPI_BASE_URL}/query/stream",
+                json=payload,
+                stream=True,
 
-    response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
-    response["Cache-Control"] = "no-cache"
+                # connect timeout = 15 seconds
+                # read timeout = 10 minutes
+                timeout=(15, 600),
+            )
+
+            resp.raise_for_status()
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "status",
+                    "message": "Agent pipeline started..."
+                })
+                + "\n\n"
+            )
+
+            answer_text = ""
+            final_event = None
+            saw_restart = False
+
+            # ---------------------------------------------------------
+            # Forward FastAPI SSE events to browser
+            # ---------------------------------------------------------
+            for line in resp.iter_lines(
+                decode_unicode=True,
+                chunk_size=1,
+            ):
+
+                if not line:
+                    continue
+
+                if not line.startswith("data: "):
+                    continue
+
+                # Forward event immediately to browser
+                yield line + "\n\n"
+
+                try:
+                    event = json.loads(line[len("data: "):])
+                except json.JSONDecodeError:
+                    continue
+
+                event_type = event.get("type")
+
+                # -----------------------------------------------------
+                # Agent restart
+                # -----------------------------------------------------
+                if event_type == "restart":
+                    answer_text = ""
+                    saw_restart = True
+
+                # -----------------------------------------------------
+                # Streaming answer token
+                # -----------------------------------------------------
+                elif event_type == "token":
+                    answer_text += event.get("content", "")
+
+                # -----------------------------------------------------
+                # Final metadata
+                # -----------------------------------------------------
+                elif event_type == "done":
+                    final_event = event
+
+            # ---------------------------------------------------------
+            # Save completed conversation
+            # ---------------------------------------------------------
+            elapsed_s = round(time.monotonic() - start_time, 1)
+
+            if final_event:
+
+                if not conversation.session_id:
+                    conversation.session_id = (
+                        final_event.get("session_id") or ""
+                    )
+
+                if conversation.title in ("", "New conversation"):
+                    conversation.title = question[:80]
+
+                conversation.save()
+
+                message = Message.objects.create(
+                    conversation=conversation,
+                    question=question,
+                    answer=answer_text,
+                    sub_questions=final_event.get(
+                        "sub_questions",
+                        [],
+                    ),
+                    domains_used=final_event.get(
+                        "domains_used",
+                        [],
+                    ),
+                    sources=final_event.get(
+                        "sources",
+                        [],
+                    ),
+                    source_details=final_event.get(
+                        "source_details",
+                        [],
+                    ),
+                    is_grounded=bool(
+                        final_event.get("is_grounded")
+                    ),
+                    retried=saw_restart,
+                    response_time_s=elapsed_s,
+                )
+
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "type": "message_id",
+                        "id": message.id,
+                    })
+                    + "\n\n"
+                )
+
+            # ---------------------------------------------------------
+            # Send response timing
+            # ---------------------------------------------------------
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "response_time",
+                    "seconds": elapsed_s,
+                })
+                + "\n\n"
+            )
+
+            # ---------------------------------------------------------
+            # Send conversation ID
+            # ---------------------------------------------------------
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "conversation_id",
+                    "id": conversation.id,
+                })
+                + "\n\n"
+            )
+
+            # ---------------------------------------------------------
+            # Explicit stream completion
+            # ---------------------------------------------------------
+            yield "data: [DONE]\n\n"
+
+        except requests.exceptions.Timeout as exc:
+
+            print(
+                f"[stream_chat] FastAPI timeout: {exc}"
+            )
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "error",
+                    "message": (
+                        "The AI agent took too long to respond. "
+                        "Please try again."
+                    ),
+                })
+                + "\n\n"
+            )
+
+        except requests.exceptions.RequestException as exc:
+
+            print(
+                f"[stream_chat] FastAPI request error: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "error",
+                    "message": (
+                        "Could not connect to the AI backend."
+                    ),
+                })
+                + "\n\n"
+            )
+
+        except Exception as exc:
+
+            print(
+                f"[stream_chat] Unexpected error: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "error",
+                    "message": str(exc),
+                })
+                + "\n\n"
+            )
+
+        finally:
+            if resp is not None:
+                resp.close()
+
+    response = StreamingHttpResponse(
+        event_stream(),
+        content_type="text/event-stream",
+    )
+
+    response["Cache-Control"] = "no-cache, no-transform"
     response["X-Accel-Buffering"] = "no"
+    response["Connection"] = "keep-alive"
+
     return response
+
 
 def stats_dashboard(request):
     """Stats overview: conversation/message counts, grounded rate, corpus
