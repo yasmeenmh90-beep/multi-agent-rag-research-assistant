@@ -11,7 +11,9 @@ Two sources because they cover different ground:
 
 Both APIs are public and don't require a key for this volume of usage.
 """
+import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -21,6 +23,13 @@ ATOM_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 SEMANTIC_SCHOLAR_API = "https://api.semanticscholar.org/graph/v1/paper/search"
 SEMANTIC_SCHOLAR_FIELDS = "title,abstract,year,authors,venue,externalIds,openAccessPdf,citationCount"
+# Optional - unauthenticated requests share a rate limit across every
+# anonymous caller on the same IP, which on a platform like Render means
+# sharing it with every other customer's traffic too, not just this app's.
+# An API key (free: https://www.semanticscholar.org/product/api#api-key)
+# gets its own dedicated quota instead. Works fine without one, just more
+# likely to hit 429s.
+SEMANTIC_SCHOLAR_API_KEY = os.getenv("SEMANTIC_SCHOLAR_API_KEY", "")
 
 
 def _normalize_title(title: str) -> str:
@@ -47,7 +56,7 @@ def search_arxiv(topic: str, max_results: int = 15) -> list[dict]:
     url = f"{ARXIV_API}?{urllib.parse.urlencode(params)}"
 
     try:
-        with urllib.request.urlopen(url, timeout=30) as resp:
+        with urllib.request.urlopen(url, timeout=60) as resp:
             raw = resp.read()
     except Exception as exc:  # noqa: BLE001
         print(f"  arXiv search failed: {exc}")
@@ -102,13 +111,31 @@ def search_semantic_scholar(topic: str, max_results: int = 15) -> list[dict]:
     }
     url = f"{SEMANTIC_SCHOLAR_API}?{urllib.parse.urlencode(params)}"
 
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            import json
-            data = json.loads(resp.read())
-    except Exception as exc:  # noqa: BLE001
-        print(f"  Semantic Scholar search failed: {exc}")
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if SEMANTIC_SCHOLAR_API_KEY:
+        headers["x-api-key"] = SEMANTIC_SCHOLAR_API_KEY
+
+    data = None
+    for attempt in range(2):  # one retry specifically for 429s, which are
+        # often just a momentary shared-IP burst rather than a hard block
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                import json
+                data = json.loads(resp.read())
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt == 0:
+                print("  Semantic Scholar rate-limited, waiting 5s before one retry ...")
+                time.sleep(5)
+                continue
+            print(f"  Semantic Scholar search failed: {exc}")
+            return []
+        except Exception as exc:  # noqa: BLE001
+            print(f"  Semantic Scholar search failed: {exc}")
+            return []
+
+    if data is None:
         return []
 
     results = []
