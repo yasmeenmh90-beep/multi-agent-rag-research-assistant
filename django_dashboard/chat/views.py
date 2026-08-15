@@ -508,8 +508,6 @@ def new_conversation(request):
     return JsonResponse({"id": conversation.id})
 
 
-@csrf_exempt
-@require_POST
 def _strip_null_bytes(value):
     """Postgres text/jsonb columns reject the NUL byte (\\x00) outright -
     not just discourage it, a single one anywhere in the payload crashes
@@ -529,6 +527,8 @@ def _strip_null_bytes(value):
     return value
 
 
+@csrf_exempt
+@require_POST
 def stream_chat(request):
     """
     Proxies to the FastAPI backend's /query/stream SSE endpoint, forwarding
