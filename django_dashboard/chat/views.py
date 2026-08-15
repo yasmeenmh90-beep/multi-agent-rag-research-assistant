@@ -377,7 +377,33 @@ def _known_domains():
     return sorted(names)
 
 
-MAX_UPLOAD_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # keep in sync with FastAPI's limit
+MAX_UPLOAD_FILE_SIZE_BYTES = int(os.getenv("MAX_UPLOAD_FILE_SIZE_MB", "2048")) * 1024 * 1024
+# Env-driven so Render (memory-constrained, 512MB total) can be configured
+# with a low value like 150 while local development keeps the default
+# 2048MB (2GB) "practically unlimited" behavior - same code, different
+# MAX_UPLOAD_FILE_SIZE_MB per deployment.
+
+
+def _format_size(num_bytes: int) -> str:
+    """Human-readable size for the upload page's hint text and error
+    messages - MB below 1GB, GB at or above, so the same wording works
+    whether this deployment is configured for 150MB or 2GB."""
+    if num_bytes >= 1024 ** 3:
+        gb = num_bytes / 1024 ** 3
+        return f"{gb:.0f}GB" if gb == int(gb) else f"{gb:.1f}GB"
+    return f"{num_bytes // (1024 ** 2)}MB"
+
+
+def _upload_base_context():
+    """Context shared by every render() in upload_corpus - the upload
+    history/known domains lists, plus the size limit info the template
+    and its JS need to display and enforce client-side."""
+    return {
+        "upload_history": UploadRecord.objects.all()[:20],
+        "known_domains": _known_domains(),
+        "max_upload_bytes": MAX_UPLOAD_FILE_SIZE_BYTES,
+        "max_upload_display": _format_size(MAX_UPLOAD_FILE_SIZE_BYTES),
+    }
 
 
 def upload_corpus(request):
@@ -394,16 +420,14 @@ def upload_corpus(request):
         if not domain or not (files or pasted_text):
             return render(request, "chat/upload.html", {
                 "error": "Please provide a domain name, and at least one file or some pasted text.",
-                "upload_history": UploadRecord.objects.all()[:20],
-                "known_domains": _known_domains(),
+                **_upload_base_context(),
             })
 
         oversized = [f.name for f in files if f.size > MAX_UPLOAD_FILE_SIZE_BYTES]
         if oversized:
             return render(request, "chat/upload.html", {
-                "error": f"These files exceed the 2GB limit: {', '.join(oversized)}",
-                "upload_history": UploadRecord.objects.all()[:20],
-                "known_domains": _known_domains(),
+                "error": f"These files exceed the {_format_size(MAX_UPLOAD_FILE_SIZE_BYTES)} limit: {', '.join(oversized)}",
+                **_upload_base_context(),
             })
 
         files_payload = [
@@ -430,8 +454,7 @@ def upload_corpus(request):
         except requests.RequestException as exc:
             return render(request, "chat/upload.html", {
                 "error": f"Upload failed: {exc}",
-                "upload_history": UploadRecord.objects.all()[:20],
-                "known_domains": _known_domains(),
+                **_upload_base_context(),
             })
 
         UploadRecord.objects.create(
@@ -443,14 +466,10 @@ def upload_corpus(request):
 
         return render(request, "chat/upload.html", {
             "result": result,
-            "upload_history": UploadRecord.objects.all()[:20],
-            "known_domains": _known_domains(),
+            **_upload_base_context(),
         })
 
-    return render(request, "chat/upload.html", {
-        "upload_history": UploadRecord.objects.all()[:20],
-        "known_domains": _known_domains(),
-    })
+    return render(request, "chat/upload.html", _upload_base_context())
 
 
 def corpus(request):
@@ -491,282 +510,111 @@ def new_conversation(request):
 
 @csrf_exempt
 @require_POST
+def _strip_null_bytes(value):
+    """Postgres text/jsonb columns reject the NUL byte (\\x00) outright -
+    not just discourage it, a single one anywhere in the payload crashes
+    the INSERT with 'unsupported Unicode escape sequence'. PDF text
+    extraction occasionally produces one from a garbled/corrupted source
+    file, and that one bad character would otherwise take down an
+    entire message's save (and, since answer_text/sources/etc are one
+    combined INSERT, the whole conversation turn) rather than just that
+    one snippet. Recurses through strings, lists, and dicts so it's safe
+    to call on the full final_event payload in one pass."""
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, list):
+        return [_strip_null_bytes(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _strip_null_bytes(v) for k, v in value.items()}
+    return value
+
+
 def stream_chat(request):
     """
-    Proxies the browser request to FastAPI's /query/stream SSE endpoint.
-
-    Important:
-    - Uses a long upstream timeout because the RAG pipeline can take time.
-    - Streams FastAPI events directly to the browser.
-    - Saves the completed Q&A to Django once the FastAPI stream finishes.
+    Proxies to the FastAPI backend's /query/stream SSE endpoint, forwarding
+    tokens straight through to the browser as they arrive, and - once the
+    stream finishes - saves the finished Q&A turn (including how long it
+    took) into this conversation.
     """
-    try:
-        body = json.loads(request.body or "{}")
-    except json.JSONDecodeError:
-        return JsonResponse(
-            {"error": "Invalid JSON request body"},
-            status=400,
-        )
-
+    body = json.loads(request.body or "{}")
     question = (body.get("question") or "").strip()
     conversation_id = body.get("conversation_id")
     explain_simply = bool(body.get("explain_simply", False))
 
     if not question:
-        return JsonResponse(
-            {"error": "question must not be empty"},
-            status=400,
-        )
+        return JsonResponse({"error": "question must not be empty"}, status=400)
 
-    conversation = (
-        get_object_or_404(Conversation, pk=conversation_id)
-        if conversation_id
-        else Conversation.objects.create()
-    )
+    conversation = get_object_or_404(Conversation, pk=conversation_id) if conversation_id else Conversation.objects.create()
 
     def event_stream():
         start_time = time.monotonic()
 
-        payload = {
-            "question": question,
-            "explain_simply": explain_simply,
-        }
-
+        payload = {"question": question, "explain_simply": explain_simply}
         if conversation.session_id:
             payload["session_id"] = conversation.session_id
 
-        resp = None
+        resp = requests.post(
+            f"{settings.FASTAPI_BASE_URL}/query/stream",
+            json=payload,
+            stream=True,
+            timeout=180,
+        )
 
-        try:
-            # ---------------------------------------------------------
-            # Connect to FastAPI
-            # ---------------------------------------------------------
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "status",
-                    "message": "Connecting to the agent..."
-                })
-                + "\n\n"
+        answer_text = ""
+        final_event = None
+        saw_restart = False
+
+        for line in resp.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data: "):
+                continue
+
+            yield line + "\n\n"
+
+            try:
+                event = json.loads(line[len("data: "):])
+            except json.JSONDecodeError:
+                continue
+
+            if event.get("type") == "restart":
+                answer_text = ""
+                saw_restart = True
+            elif event.get("type") == "token":
+                answer_text += event.get("content", "")
+            elif event.get("type") == "done":
+                final_event = event
+
+        elapsed_s = round(time.monotonic() - start_time, 1)
+
+        if final_event:
+            if not conversation.session_id:
+                conversation.session_id = final_event.get("session_id", "")
+            if conversation.title in ("", "New conversation"):
+                conversation.title = question[:80]
+            conversation.save()
+
+            message = Message.objects.create(
+                conversation=conversation,
+                question=_strip_null_bytes(question),
+                answer=_strip_null_bytes(answer_text),
+                sub_questions=_strip_null_bytes(final_event.get("sub_questions", [])),
+                domains_used=_strip_null_bytes(final_event.get("domains_used", [])),
+                sources=_strip_null_bytes(final_event.get("sources", [])),
+                source_details=_strip_null_bytes(final_event.get("source_details", [])),
+                is_grounded=bool(final_event.get("is_grounded")),
+                retried=saw_restart,
+                response_time_s=elapsed_s,
             )
+            yield f"data: {json.dumps({'type': 'message_id', 'id': message.id})}\n\n"
 
-            resp = requests.post(
-                f"{settings.FASTAPI_BASE_URL}/query/stream",
-                json=payload,
-                stream=True,
+        # Extra client-side event (our own, not from FastAPI) so the live
+        # UI can show the timing without waiting for a page reload.
+        yield f"data: {json.dumps({'type': 'response_time', 'seconds': elapsed_s})}\n\n"
+        yield f"data: {json.dumps({'type': 'conversation_id', 'id': conversation.id})}\n\n"
 
-                # connect timeout = 15 seconds
-                # read timeout = 10 minutes
-                timeout=(15, 600),
-            )
-
-            resp.raise_for_status()
-
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "status",
-                    "message": "Agent pipeline started..."
-                })
-                + "\n\n"
-            )
-
-            answer_text = ""
-            final_event = None
-            saw_restart = False
-
-            # ---------------------------------------------------------
-            # Forward FastAPI SSE events to browser
-            # ---------------------------------------------------------
-            for line in resp.iter_lines(
-                decode_unicode=True,
-                chunk_size=1,
-            ):
-
-                if not line:
-                    continue
-
-                if not line.startswith("data: "):
-                    continue
-
-                # Forward event immediately to browser
-                yield line + "\n\n"
-
-                try:
-                    event = json.loads(line[len("data: "):])
-                except json.JSONDecodeError:
-                    continue
-
-                event_type = event.get("type")
-
-                # -----------------------------------------------------
-                # Agent restart
-                # -----------------------------------------------------
-                if event_type == "restart":
-                    answer_text = ""
-                    saw_restart = True
-
-                # -----------------------------------------------------
-                # Streaming answer token
-                # -----------------------------------------------------
-                elif event_type == "token":
-                    answer_text += event.get("content", "")
-
-                # -----------------------------------------------------
-                # Final metadata
-                # -----------------------------------------------------
-                elif event_type == "done":
-                    final_event = event
-
-            # ---------------------------------------------------------
-            # Save completed conversation
-            # ---------------------------------------------------------
-            elapsed_s = round(time.monotonic() - start_time, 1)
-
-            if final_event:
-
-                if not conversation.session_id:
-                    conversation.session_id = (
-                        final_event.get("session_id") or ""
-                    )
-
-                if conversation.title in ("", "New conversation"):
-                    conversation.title = question[:80]
-
-                conversation.save()
-
-                message = Message.objects.create(
-                    conversation=conversation,
-                    question=question,
-                    answer=answer_text,
-                    sub_questions=final_event.get(
-                        "sub_questions",
-                        [],
-                    ),
-                    domains_used=final_event.get(
-                        "domains_used",
-                        [],
-                    ),
-                    sources=final_event.get(
-                        "sources",
-                        [],
-                    ),
-                    source_details=final_event.get(
-                        "source_details",
-                        [],
-                    ),
-                    is_grounded=bool(
-                        final_event.get("is_grounded")
-                    ),
-                    retried=saw_restart,
-                    response_time_s=elapsed_s,
-                )
-
-                yield (
-                    "data: "
-                    + json.dumps({
-                        "type": "message_id",
-                        "id": message.id,
-                    })
-                    + "\n\n"
-                )
-
-            # ---------------------------------------------------------
-            # Send response timing
-            # ---------------------------------------------------------
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "response_time",
-                    "seconds": elapsed_s,
-                })
-                + "\n\n"
-            )
-
-            # ---------------------------------------------------------
-            # Send conversation ID
-            # ---------------------------------------------------------
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "conversation_id",
-                    "id": conversation.id,
-                })
-                + "\n\n"
-            )
-
-            # ---------------------------------------------------------
-            # Explicit stream completion
-            # ---------------------------------------------------------
-            yield "data: [DONE]\n\n"
-
-        except requests.exceptions.Timeout as exc:
-
-            print(
-                f"[stream_chat] FastAPI timeout: {exc}"
-            )
-
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "error",
-                    "message": (
-                        "The AI agent took too long to respond. "
-                        "Please try again."
-                    ),
-                })
-                + "\n\n"
-            )
-
-        except requests.exceptions.RequestException as exc:
-
-            print(
-                f"[stream_chat] FastAPI request error: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "error",
-                    "message": (
-                        "Could not connect to the AI backend."
-                    ),
-                })
-                + "\n\n"
-            )
-
-        except Exception as exc:
-
-            print(
-                f"[stream_chat] Unexpected error: "
-                f"{type(exc).__name__}: {exc}"
-            )
-
-            yield (
-                "data: "
-                + json.dumps({
-                    "type": "error",
-                    "message": str(exc),
-                })
-                + "\n\n"
-            )
-
-        finally:
-            if resp is not None:
-                resp.close()
-
-    response = StreamingHttpResponse(
-        event_stream(),
-        content_type="text/event-stream",
-    )
-
-    response["Cache-Control"] = "no-cache, no-transform"
+    response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
-    response["Connection"] = "keep-alive"
-
     return response
-
 
 def stats_dashboard(request):
     """Stats overview: conversation/message counts, grounded rate, corpus
